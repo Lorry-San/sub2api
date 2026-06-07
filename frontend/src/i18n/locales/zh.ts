@@ -1854,6 +1854,7 @@ export default {
         usageOpenAI: '用量 (OpenAI)',
         usageGemini: '用量 (Gemini)',
         usageAntigravity: '用量 (Antigravity)',
+        usageKiro: '用量 (Kiro)',
         concurrency: '并发数',
         status: '状态',
         lastActive: '最后活跃时间',
@@ -2202,6 +2203,7 @@ export default {
         openai: 'OpenAI',
         gemini: 'Gemini',
         antigravity: 'Antigravity',
+        kiro: 'Kiro',
       },
       saving: '保存中...',
       noGroups: '暂无分组',
@@ -3263,6 +3265,7 @@ export default {
         anthropic: 'Anthropic',
         gemini: 'Gemini',
         antigravity: 'Antigravity',
+        kiro: 'Kiro',
       },
       types: {
         oauth: 'OAuth',
@@ -3967,6 +3970,33 @@ export default {
           validateAndCreate: '验证并创建账号',
           pleaseEnterRefreshToken: '请输入 Refresh Token',
           failedToValidateRT: '验证 Refresh Token 失败'
+        },
+        // Kiro specific
+        kiro: {
+          title: 'Kiro 账户授权',
+          followSteps: '请按照以下步骤完成 Kiro 账户授权：',
+          step1GenerateUrl: '启动设备授权',
+          generateAuthUrl: '启动设备授权',
+          step2OpenUrl: '打开链接并输入用户代码',
+          openUrlDesc: '在浏览器中打开验证链接，输入用户代码并批准访问。',
+          step3EnterCode: '完成设备授权',
+          authCodeDesc: '在浏览器中批准访问后，点击完成授权轮询设备会话。',
+          authCode: '设备代码',
+          authCodePlaceholder: '无需手动输入授权码。',
+          authCodeHint: '在 Kiro 授权页面输入上方显示的用户代码。',
+          userCode: '用户代码',
+          refreshTokenAuth: '手动输入 RT',
+          refreshTokenDesc: '输入您已有的 Kiro Refresh Token，支持批量输入（每行一个），系统将自动验证并创建账号。',
+          refreshTokenPlaceholder: '粘贴您的 Kiro Refresh Token...\n支持多个，每行一个',
+          validating: '验证中...',
+          validateAndCreate: '验证并创建账号',
+          pleaseEnterRefreshToken: '请输入 Refresh Token',
+          failedToStart: '启动 Kiro 设备授权失败',
+          missingSession: '缺少 Kiro 设备会话',
+          slowDown: '授权仍在等待中，请稍后再试。',
+          authorizationPending: '授权尚未完成。请在浏览器中批准后重试。',
+          failedToPoll: '轮询 Kiro 授权状态失败',
+          failedToValidateRT: '验证 Kiro Refresh Token 失败'
         }
       },
       // Gemini specific (platform-wide)
@@ -4110,6 +4140,7 @@ export default {
       openaiAccount: 'OpenAI 账号',
       geminiAccount: 'Gemini 账号',
       antigravityAccount: 'Antigravity 账号',
+      kiroAccount: 'Kiro 账号',
       inputMethod: '输入方式',
       reAuthorizedSuccess: '账号重新授权成功',
       // Test Modal

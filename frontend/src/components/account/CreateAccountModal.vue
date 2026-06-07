@@ -111,6 +111,19 @@
           </button>
           <button
             type="button"
+            @click="form.platform = 'kiro'"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'kiro'
+                ? 'bg-white text-cyan-600 shadow-sm dark:bg-dark-600 dark:text-cyan-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <Icon name="cloud" size="sm" />
+            Kiro
+          </button>
+          <button
+            type="button"
             @click="form.platform = 'gemini'"
             :class="[
               'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
@@ -2864,12 +2877,13 @@
         :show-proxy-warning="form.platform !== 'openai' && !!form.proxy_id"
         :allow-multiple="form.platform === 'anthropic'"
         :show-cookie-option="form.platform === 'anthropic'"
-        :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity'"
+        :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity' || form.platform === 'kiro'"
         :show-mobile-refresh-token-option="form.platform === 'openai'"
         :show-session-token-option="false"
         :show-access-token-option="false"
         :show-codex-session-import-option="form.platform === 'openai'"
         :platform="form.platform"
+        :device-user-code="currentDeviceUserCode"
         :show-project-id="geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
@@ -3217,6 +3231,7 @@ import {
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
+import { useKiroOAuth } from '@/composables/useKiroOAuth'
 import type {
   Proxy,
   AdminGroup,
@@ -3273,6 +3288,7 @@ const oauthStepTitle = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.oauth.openai.title')
   if (form.platform === 'gemini') return t('admin.accounts.oauth.gemini.title')
   if (form.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.title')
+  if (form.platform === 'kiro') return t('admin.accounts.oauth.kiro.title')
   return t('admin.accounts.oauth.title')
 })
 
@@ -3308,12 +3324,14 @@ const oauth = useAccountOAuth() // For Anthropic OAuth
 const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
+const kiroOAuth = useKiroOAuth() // For Kiro OAuth
 
 // Computed: current OAuth state for template binding
 const currentAuthUrl = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.authUrl.value
   if (form.platform === 'gemini') return geminiOAuth.authUrl.value
   if (form.platform === 'antigravity') return antigravityOAuth.authUrl.value
+  if (form.platform === 'kiro') return kiroOAuth.authUrl.value
   return oauth.authUrl.value
 })
 
@@ -3321,6 +3339,7 @@ const currentSessionId = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.sessionId.value
   if (form.platform === 'gemini') return geminiOAuth.sessionId.value
   if (form.platform === 'antigravity') return antigravityOAuth.sessionId.value
+  if (form.platform === 'kiro') return kiroOAuth.sessionId.value
   return oauth.sessionId.value
 })
 
@@ -3328,6 +3347,7 @@ const currentOAuthLoading = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.loading.value
   if (form.platform === 'gemini') return geminiOAuth.loading.value
   if (form.platform === 'antigravity') return antigravityOAuth.loading.value
+  if (form.platform === 'kiro') return kiroOAuth.loading.value
   return oauth.loading.value
 })
 
@@ -3335,7 +3355,13 @@ const currentOAuthError = computed(() => {
   if (form.platform === 'openai') return openaiOAuth.error.value
   if (form.platform === 'gemini') return geminiOAuth.error.value
   if (form.platform === 'antigravity') return antigravityOAuth.error.value
+  if (form.platform === 'kiro') return kiroOAuth.error.value
   return oauth.error.value
+})
+
+const currentDeviceUserCode = computed(() => {
+  if (form.platform === 'kiro') return kiroOAuth.userCode.value
+  return ''
 })
 
 // Refs
@@ -3731,6 +3757,9 @@ const canExchangeCode = computed(() => {
   if (form.platform === 'antigravity') {
     return authCode.trim() && antigravityOAuth.sessionId.value && !antigravityOAuth.loading.value
   }
+  if (form.platform === 'kiro') {
+    return kiroOAuth.sessionId.value && !kiroOAuth.loading.value
+  }
   return authCode.trim() && oauth.sessionId.value && !oauth.loading.value
 })
 
@@ -3772,6 +3801,10 @@ watch(
       form.type = 'apikey'
       return
     }
+    if (form.platform === 'kiro') {
+      form.type = 'oauth'
+      return
+    }
     // Bedrock 类型
     if (form.platform === 'anthropic' && category === 'bedrock') {
       form.type = 'bedrock' as AccountType
@@ -3798,7 +3831,9 @@ watch(
         ? 'https://api.openai.com'
         : newPlatform === 'gemini'
           ? 'https://generativelanguage.googleapis.com'
-          : 'https://api.anthropic.com'
+          : newPlatform === 'kiro'
+            ? 'https://q.us-east-1.amazonaws.com'
+            : 'https://api.anthropic.com'
     // Clear model-related settings
     allowedModels.value = []
     modelMappings.value = []
@@ -3822,6 +3857,10 @@ watch(
     }
     if (newPlatform !== 'anthropic' && accountCategory.value === 'bedrock') {
       accountCategory.value = 'oauth-based'
+    }
+    if (newPlatform === 'kiro') {
+      accountCategory.value = 'oauth-based'
+      addMethod.value = 'oauth'
     }
     // Reset Bedrock fields when switching platforms
     bedrockAccessKeyId.value = ''
@@ -3857,6 +3896,7 @@ watch(
 
     geminiOAuth.resetState()
     antigravityOAuth.resetState()
+    kiroOAuth.resetState()
   }
 )
 
@@ -4287,6 +4327,7 @@ const resetForm = () => {
   openaiOAuth.resetState()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
+  kiroOAuth.resetState()
   oauthFlowRef.value?.reset()
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
@@ -4681,6 +4722,7 @@ const goBackToBasicInfo = () => {
   openaiOAuth.resetState()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
+  kiroOAuth.resetState()
   oauthFlowRef.value?.reset()
 }
 
@@ -4696,6 +4738,8 @@ const handleGenerateUrl = async () => {
     )
   } else if (form.platform === 'antigravity') {
     await antigravityOAuth.generateAuthUrl(form.proxy_id)
+  } else if (form.platform === 'kiro') {
+    await kiroOAuth.startDeviceFlow(form.proxy_id)
   } else {
     await oauth.generateAuthUrl(addMethod.value, form.proxy_id)
   }
@@ -4706,6 +4750,8 @@ const handleValidateRefreshToken = (rt: string) => {
     handleOpenAIValidateRT(rt)
   } else if (form.platform === 'antigravity') {
     handleAntigravityValidateRT(rt)
+  } else if (form.platform === 'kiro') {
+    handleKiroValidateRT(rt)
   }
 }
 
@@ -5187,6 +5233,85 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
   }
 }
 
+const handleKiroValidateRT = async (refreshTokenInput: string) => {
+  if (!refreshTokenInput.trim()) return
+
+  const refreshTokens = refreshTokenInput
+    .split('\n')
+    .map((rt) => rt.trim())
+    .filter((rt) => rt)
+
+  if (refreshTokens.length === 0) {
+    kiroOAuth.error.value = t('admin.accounts.oauth.kiro.pleaseEnterRefreshToken')
+    return
+  }
+
+  kiroOAuth.loading.value = true
+  kiroOAuth.error.value = ''
+
+  let successCount = 0
+  let failedCount = 0
+  const errors: string[] = []
+
+  try {
+    for (let i = 0; i < refreshTokens.length; i++) {
+      try {
+        const tokenInfo = await kiroOAuth.validateRefreshToken(refreshTokens[i], form.proxy_id)
+        if (!tokenInfo) {
+          failedCount++
+          errors.push(`#${i + 1}: ${kiroOAuth.error.value || 'Validation failed'}`)
+          kiroOAuth.error.value = ''
+          continue
+        }
+
+        const accountName = refreshTokens.length > 1 ? `${form.name} #${i + 1}` : form.name
+        await adminAPI.accounts.create({
+          name: accountName,
+          notes: form.notes,
+          platform: 'kiro',
+          type: 'oauth',
+          credentials: kiroOAuth.buildCredentials(tokenInfo),
+          extra: {},
+          proxy_id: form.proxy_id,
+          concurrency: form.concurrency,
+          load_factor: form.load_factor ?? undefined,
+          priority: form.priority,
+          rate_multiplier: form.rate_multiplier,
+          group_ids: form.group_ids,
+          expires_at: form.expires_at,
+          auto_pause_on_expired: autoPauseOnExpired.value
+        })
+        successCount++
+      } catch (error: any) {
+        failedCount++
+        const errMsg = error.response?.data?.detail || error.message || 'Unknown error'
+        errors.push(`#${i + 1}: ${errMsg}`)
+      }
+    }
+
+    if (successCount > 0 && failedCount === 0) {
+      appStore.showSuccess(
+        refreshTokens.length > 1
+          ? t('admin.accounts.oauth.batchSuccess', { count: successCount })
+          : t('admin.accounts.accountCreated')
+      )
+      emit('created')
+      handleClose()
+    } else if (successCount > 0 && failedCount > 0) {
+      appStore.showWarning(
+        t('admin.accounts.oauth.batchPartialSuccess', { success: successCount, failed: failedCount })
+      )
+      kiroOAuth.error.value = errors.join('\n')
+      emit('created')
+    } else {
+      kiroOAuth.error.value = errors.join('\n')
+      appStore.showError(t('admin.accounts.oauth.batchFailed'))
+    }
+  } finally {
+    kiroOAuth.loading.value = false
+  }
+}
+
 // Gemini OAuth 授权码兑换
 const handleGeminiExchange = async (authCode: string) => {
   if (!authCode.trim() || !geminiOAuth.sessionId.value) return
@@ -5267,6 +5392,17 @@ const handleAntigravityExchange = async (authCode: string) => {
   } finally {
     antigravityOAuth.loading.value = false
   }
+}
+
+const handleKiroExchange = async () => {
+  const sessionId = kiroOAuth.sessionId.value
+  if (!sessionId) return
+
+  const tokenInfo = await kiroOAuth.pollDeviceFlow(sessionId, form.proxy_id)
+  if (!tokenInfo) return
+
+  const credentials = kiroOAuth.buildCredentials(tokenInfo)
+  await createAccountAndFinish('kiro', 'oauth', credentials, {})
 }
 
 // Anthropic OAuth 授权码兑换
@@ -5369,6 +5505,8 @@ const handleExchangeCode = async () => {
       return handleGeminiExchange(authCode)
     case 'antigravity':
       return handleAntigravityExchange(authCode)
+    case 'kiro':
+      return handleKiroExchange()
     default:
       return handleAnthropicExchange(authCode)
   }

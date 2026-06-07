@@ -502,6 +502,30 @@
                       />
                     </button>
                   </div>
+                  <div
+                    v-if="isDeviceFlow && deviceUserCode"
+                    class="rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-700 dark:bg-blue-900/20"
+                  >
+                    <label class="mb-2 block text-xs font-medium uppercase text-blue-700 dark:text-blue-300">
+                      {{ t('admin.accounts.oauth.kiro.userCode') }}
+                    </label>
+                    <div class="flex items-center gap-2">
+                      <input
+                        :value="deviceUserCode"
+                        readonly
+                        type="text"
+                        class="input flex-1 bg-white font-mono text-sm tracking-widest dark:bg-gray-800"
+                      />
+                      <button
+                        type="button"
+                        class="btn btn-secondary p-2"
+                        :title="t('common.copy')"
+                        @click="handleCopyDeviceCode"
+                      >
+                        <Icon name="copy" size="sm" />
+                      </button>
+                    </div>
+                  </div>
                   <button
                     type="button"
                     class="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400"
@@ -556,7 +580,7 @@
             </div>
           </div>
 
-          <!-- Step 3: Enter authorization code -->
+          <!-- Step 3: Enter authorization code / poll device flow -->
           <div
             class="rounded-lg border border-blue-300 bg-white/80 p-4 dark:border-blue-600 dark:bg-gray-800/80"
           >
@@ -574,7 +598,7 @@
                   class="mb-3 text-sm text-blue-700 dark:text-blue-300"
                   v-text="oauthAuthCodeDesc"
                 ></p>
-                <div>
+                <div v-if="!isDeviceFlow">
                   <label class="input-label">
                     <Icon name="key" size="sm" class="mr-1 inline text-blue-500" />
                     {{ oauthAuthCode }}
@@ -654,6 +678,7 @@ interface Props {
   showCodexSessionImportOption?: boolean
   platform?: AccountPlatform // Platform type for different UI/text
   showProjectId?: boolean // New prop to control project ID visibility
+  deviceUserCode?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -672,7 +697,8 @@ const props = withDefaults(defineProps<Props>(), {
   showAccessTokenOption: false,
   showCodexSessionImportOption: false,
   platform: 'anthropic',
-  showProjectId: true
+  showProjectId: true,
+  deviceUserCode: ''
 })
 
 const emit = defineEmits<{
@@ -690,12 +716,14 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const isOpenAI = computed(() => props.platform === 'openai')
+const isDeviceFlow = computed(() => props.platform === 'kiro')
 
 // Get translation key based on platform
 const getOAuthKey = (key: string) => {
   if (props.platform === 'openai') return `admin.accounts.oauth.openai.${key}`
   if (props.platform === 'gemini') return `admin.accounts.oauth.gemini.${key}`
   if (props.platform === 'antigravity') return `admin.accounts.oauth.antigravity.${key}`
+  if (props.platform === 'kiro') return `admin.accounts.oauth.kiro.${key}`
   return `admin.accounts.oauth.${key}`
 }
 
@@ -807,6 +835,12 @@ const handleGenerateUrl = () => {
 const handleCopyUrl = () => {
   if (props.authUrl) {
     copyToClipboard(props.authUrl, 'URL copied to clipboard')
+  }
+}
+
+const handleCopyDeviceCode = () => {
+  if (props.deviceUserCode) {
+    copyToClipboard(props.deviceUserCode, 'Code copied to clipboard')
   }
 }
 

@@ -79,6 +79,13 @@ const antigravityModels = [
   'tab_flash_lite_preview'
 ]
 
+// Kiro / Amazon Q accepts a small Claude-flavored model surface.
+const kiroModels = [
+  'claude-sonnet-4',
+  'claude-haiku-4.5',
+  'claude-opus-4.5'
+]
+
 // 智谱 GLM
 const zhipuModels = [
   'glm-4', 'glm-4v', 'glm-4-plus', 'glm-4-0520',
@@ -209,6 +216,7 @@ const allModelsList: string[] = [
   ...openaiModels,
   ...claudeModels,
   ...geminiModels,
+  ...kiroModels,
   ...zhipuModels,
   ...qwenModels,
   ...deepseekModels,
@@ -361,6 +369,7 @@ export function getModelsByPlatform(platform: string): string[] {
     case 'claude': return claudeModels
     case 'gemini': return geminiModels
     case 'antigravity': return antigravityModels
+    case 'kiro': return kiroModels
     case 'zhipu': return zhipuModels
     case 'qwen': return qwenModels
     case 'deepseek': return deepseekModels

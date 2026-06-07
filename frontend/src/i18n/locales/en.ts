@@ -1833,6 +1833,7 @@ export default {
         usageOpenAI: 'Usage (OpenAI)',
         usageGemini: 'Usage (Gemini)',
         usageAntigravity: 'Usage (Antigravity)',
+        usageKiro: 'Usage (Kiro)',
         concurrency: 'Concurrency',
         status: 'Status',
         lastActive: 'Last Active',
@@ -2174,6 +2175,7 @@ export default {
         openai: 'OpenAI',
         gemini: 'Gemini',
         antigravity: 'Antigravity',
+        kiro: 'Kiro',
       },
       deleteConfirm:
         "Are you sure you want to delete '{name}'? All associated API keys will no longer belong to any group.",
@@ -3076,6 +3078,7 @@ export default {
         openai: 'OpenAI',
         gemini: 'Gemini',
         antigravity: 'Antigravity',
+        kiro: 'Kiro',
       },
       types: {
         oauth: 'OAuth',
@@ -3839,6 +3842,33 @@ export default {
                     validateAndCreate: 'Validate & Create',
                     pleaseEnterRefreshToken: 'Please enter Refresh Token',
                     failedToValidateRT: 'Failed to validate Refresh Token'
+                  },
+                  // Kiro specific
+                  kiro: {
+                    title: 'Kiro Account Authorization',
+                    followSteps: 'Follow these steps to authorize your Kiro account:',
+                    step1GenerateUrl: 'Start device authorization',
+                    generateAuthUrl: 'Start Device Flow',
+                    step2OpenUrl: 'Open the URL and enter the user code',
+                    openUrlDesc: 'Open the verification URL in your browser, enter the user code, and approve access.',
+                    step3EnterCode: 'Complete device authorization',
+                    authCodeDesc: 'After approving access in the browser, click Complete Authorization to poll the device session.',
+                    authCode: 'Device Code',
+                    authCodePlaceholder: 'No manual code input is required.',
+                    authCodeHint: 'Use the displayed user code on the Kiro authorization page.',
+                    userCode: 'User Code',
+                    refreshTokenAuth: 'Manual RT',
+                    refreshTokenDesc: 'Enter your existing Kiro Refresh Token. Supports batch input (one per line). The system will validate and create accounts.',
+                    refreshTokenPlaceholder: 'Paste your Kiro Refresh Token...\nSupports multiple tokens, one per line',
+                    validating: 'Validating...',
+                    validateAndCreate: 'Validate & Create',
+                    pleaseEnterRefreshToken: 'Please enter Refresh Token',
+                    failedToStart: 'Failed to start Kiro device authorization',
+                    missingSession: 'Missing Kiro device session',
+                    slowDown: 'Authorization is still pending. Please wait a bit before polling again.',
+                    authorizationPending: 'Authorization is pending. Approve the request in your browser, then try again.',
+                    failedToPoll: 'Failed to poll Kiro authorization status',
+                    failedToValidateRT: 'Failed to validate Kiro Refresh Token'
                   }
                 },      // Gemini specific (platform-wide)
       gemini: {
@@ -3983,6 +4013,7 @@ export default {
       openaiAccount: 'OpenAI Account',
       geminiAccount: 'Gemini Account',
       antigravityAccount: 'Antigravity Account',
+      kiroAccount: 'Kiro Account',
       inputMethod: 'Input Method',
       reAuthorizedSuccess: 'Account re-authorized successfully',
       // Test Modal

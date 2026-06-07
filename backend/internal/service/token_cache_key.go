@@ -13,3 +13,9 @@ func OpenAITokenCacheKey(account *Account) string {
 func ClaudeTokenCacheKey(account *Account) string {
 	return "claude:account:" + strconv.FormatInt(account.ID, 10)
 }
+
+// KiroTokenCacheKey generates the cache key for Kiro OAuth accounts.
+// Format: "kiro:account:{account_id}"
+func KiroTokenCacheKey(account *Account) string {
+	return "kiro:account:" + strconv.FormatInt(account.ID, 10)
+}

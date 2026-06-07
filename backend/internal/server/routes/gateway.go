@@ -230,6 +230,21 @@ func RegisterGatewayRoutes(
 		antigravityV1.GET("/usage", h.Gateway.Usage)
 	}
 
+	kiroV1 := r.Group("/kiro/v1")
+	kiroV1.Use(bodyLimit)
+	kiroV1.Use(clientRequestID)
+	kiroV1.Use(opsErrorLogger)
+	kiroV1.Use(endpointNorm)
+	kiroV1.Use(middleware.ForcePlatform(service.PlatformKiro))
+	kiroV1.Use(gin.HandlerFunc(apiKeyAuth))
+	kiroV1.Use(requireGroupAnthropic)
+	{
+		kiroV1.POST("/messages", h.Gateway.Messages)
+		kiroV1.POST("/messages/count_tokens", h.Gateway.CountTokens)
+		kiroV1.GET("/models", h.Gateway.Models)
+		kiroV1.GET("/usage", h.Gateway.Usage)
+	}
+
 	antigravityV1Beta := r.Group("/antigravity/v1beta")
 	antigravityV1Beta.Use(bodyLimit)
 	antigravityV1Beta.Use(clientRequestID)
