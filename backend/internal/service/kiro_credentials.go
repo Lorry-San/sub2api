@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 )
 
 const (
@@ -19,10 +21,76 @@ const (
 	DefaultKiroModelSonnet = "claude-sonnet-4"
 	DefaultKiroModelHaiku  = "claude-haiku-4.5"
 	DefaultKiroModelOpus   = "claude-opus-4.5"
+	DefaultKiroModelOpus46 = "claude-opus-4-6"
+	DefaultKiroModelOpus47 = "claude-opus-4-7"
+	DefaultKiroModelOpus48 = "claude-opus-4-8"
 	KiroAuthMethodIDC      = "idc"
 	KiroAuthMethodSocial   = "social"
 	KiroTokenRefreshMargin = 5 * time.Minute
 )
+
+var kiroDefaultModels = []claude.Model{
+	{
+		ID:          DefaultKiroModelSonnet,
+		Type:        "model",
+		DisplayName: "Claude Sonnet 4",
+		CreatedAt:   "",
+	},
+	{
+		ID:          DefaultKiroModelHaiku,
+		Type:        "model",
+		DisplayName: "Claude Haiku 4.5",
+		CreatedAt:   "",
+	},
+	{
+		ID:          DefaultKiroModelOpus,
+		Type:        "model",
+		DisplayName: "Claude Opus 4.5",
+		CreatedAt:   "",
+	},
+	{
+		ID:          DefaultKiroModelOpus46,
+		Type:        "model",
+		DisplayName: "Claude Opus 4.6",
+		CreatedAt:   "2026-02-05T00:00:00Z",
+	},
+	{
+		ID:          DefaultKiroModelOpus47,
+		Type:        "model",
+		DisplayName: "Claude Opus 4.7",
+		CreatedAt:   "2026-04-17T00:00:00Z",
+	},
+	{
+		ID:          DefaultKiroModelOpus48,
+		Type:        "model",
+		DisplayName: "Claude Opus 4.8",
+		CreatedAt:   "2026-05-29T00:00:00Z",
+	},
+}
+
+func KiroDefaultModels() []claude.Model {
+	models := make([]claude.Model, len(kiroDefaultModels))
+	copy(models, kiroDefaultModels)
+	return models
+}
+
+func KiroDefaultModelIDs() []string {
+	ids := make([]string, len(kiroDefaultModels))
+	for i, model := range kiroDefaultModels {
+		ids[i] = model.ID
+	}
+	return ids
+}
+
+func isKiroSupportedModel(model string) bool {
+	model = strings.TrimSpace(model)
+	for _, supported := range kiroDefaultModels {
+		if model == supported.ID {
+			return true
+		}
+	}
+	return false
+}
 
 type KiroCredentials struct {
 	AccessToken  string
@@ -223,8 +291,16 @@ func defaultKiroMappedModel(requested string) string {
 	switch {
 	case lower == "":
 		return DefaultKiroModelSonnet
+	case isKiroSupportedModel(lower):
+		return lower
 	case strings.Contains(lower, "haiku"):
 		return DefaultKiroModelHaiku
+	case strings.Contains(lower, "opus-4-8"), strings.Contains(lower, "opus-4.8"):
+		return DefaultKiroModelOpus48
+	case strings.Contains(lower, "opus-4-7"), strings.Contains(lower, "opus-4.7"):
+		return DefaultKiroModelOpus47
+	case strings.Contains(lower, "opus-4-6"), strings.Contains(lower, "opus-4.6"):
+		return DefaultKiroModelOpus46
 	case strings.Contains(lower, "opus"):
 		return DefaultKiroModelOpus
 	case strings.Contains(lower, "sonnet"), strings.Contains(lower, "claude-3-5"), strings.Contains(lower, "claude-4"):

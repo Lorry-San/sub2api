@@ -65,6 +65,48 @@ func TestAccountTestService_KiroUsesNativeUpstream(t *testing.T) {
 	require.Equal(t, "claude-sonnet-4", userInput["modelId"])
 }
 
+func TestAccountTestService_KiroPreservesNewerOpusModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, recorder := newTestContext()
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"assistantResponseEvent":{"content":"ok"}}`)),
+		},
+	}
+	repo := &mockAccountRepoForGemini{}
+	kiroGateway := NewKiroGatewayService(repo, upstream, nil)
+	svc := &AccountTestService{
+		accountRepo:        repo,
+		kiroGatewayService: kiroGateway,
+		httpUpstream:       upstream,
+	}
+	account := &Account{
+		ID:          93,
+		Name:        "kiro-oauth-opus",
+		Platform:    PlatformKiro,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "kiro-token",
+			"expires_at":   strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+		},
+	}
+
+	err := svc.testKiroAccountConnection(c, account, DefaultKiroModelOpus48)
+	require.NoError(t, err)
+	require.Contains(t, recorder.Body.String(), `"model":"claude-opus-4-8"`)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(upstream.lastBody, &sent))
+	conversationState := sent["conversationState"].(map[string]any)
+	currentMessage := conversationState["currentMessage"].(map[string]any)
+	userInput := currentMessage["userInputMessage"].(map[string]any)
+	require.Equal(t, DefaultKiroModelOpus48, userInput["modelId"])
+}
+
 func TestAccountTestService_KiroAccountConnectionDoesNotFallbackToClaude(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()

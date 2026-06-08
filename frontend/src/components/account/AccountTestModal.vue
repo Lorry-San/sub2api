@@ -296,7 +296,10 @@ const prioritizedGeminiModels = ['gemini-3.1-flash-image', 'gemini-2.5-flash-ima
 const kiroTestModels: ClaudeModel[] = [
   { id: 'claude-sonnet-4', type: 'model', display_name: 'Claude Sonnet 4', created_at: '' },
   { id: 'claude-haiku-4.5', type: 'model', display_name: 'Claude Haiku 4.5', created_at: '' },
-  { id: 'claude-opus-4.5', type: 'model', display_name: 'Claude Opus 4.5', created_at: '' }
+  { id: 'claude-opus-4.5', type: 'model', display_name: 'Claude Opus 4.5', created_at: '' },
+  { id: 'claude-opus-4-6', type: 'model', display_name: 'Claude Opus 4.6', created_at: '2026-02-05T00:00:00Z' },
+  { id: 'claude-opus-4-7', type: 'model', display_name: 'Claude Opus 4.7', created_at: '2026-04-17T00:00:00Z' },
+  { id: 'claude-opus-4-8', type: 'model', display_name: 'Claude Opus 4.8', created_at: '2026-05-29T00:00:00Z' }
 ]
 const supportsGeminiImageTest = computed(() => {
   const modelID = selectedModelId.value.toLowerCase()

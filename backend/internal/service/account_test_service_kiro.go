@@ -13,12 +13,10 @@ import (
 
 func normalizeKiroTestModel(modelID string) string {
 	model := strings.TrimSpace(defaultKiroMappedModel(modelID))
-	switch model {
-	case DefaultKiroModelSonnet, DefaultKiroModelHaiku, DefaultKiroModelOpus:
+	if isKiroSupportedModel(model) {
 		return model
-	default:
-		return DefaultKiroModelSonnet
 	}
+	return DefaultKiroModelSonnet
 }
 
 // testKiroAccountConnection tests a Kiro/Amazon Q account using the native

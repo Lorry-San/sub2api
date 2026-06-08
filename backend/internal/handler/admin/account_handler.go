@@ -2064,26 +2064,7 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	}
 
 	if account.Platform == service.PlatformKiro {
-		response.Success(c, []claude.Model{
-			{
-				ID:          service.DefaultKiroModelSonnet,
-				Type:        "model",
-				DisplayName: "Claude Sonnet 4",
-				CreatedAt:   "",
-			},
-			{
-				ID:          service.DefaultKiroModelHaiku,
-				Type:        "model",
-				DisplayName: "Claude Haiku 4.5",
-				CreatedAt:   "",
-			},
-			{
-				ID:          service.DefaultKiroModelOpus,
-				Type:        "model",
-				DisplayName: "Claude Opus 4.5",
-				CreatedAt:   "",
-			},
-		})
+		response.Success(c, service.KiroDefaultModels())
 		return
 	}
 

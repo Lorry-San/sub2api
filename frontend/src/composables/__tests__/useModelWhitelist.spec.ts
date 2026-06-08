@@ -40,6 +40,14 @@ describe('useModelWhitelist', () => {
     expect(getModelsByPlatform('antigravity')).toContain('claude-opus-4-8')
   })
 
+  it('Kiro model list includes Opus 4.6/4.7/4.8', () => {
+    const models = getModelsByPlatform('kiro')
+
+    expect(models).toContain('claude-opus-4-6')
+    expect(models).toContain('claude-opus-4-7')
+    expect(models).toContain('claude-opus-4-8')
+  })
+
   it('gemini 模型列表包含原生生图模型', () => {
     const models = getModelsByPlatform('gemini')
 

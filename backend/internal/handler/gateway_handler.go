@@ -1151,14 +1151,7 @@ func defaultModelIDsForPlatform(platform string) []string {
 		}
 		return ids
 	case service.PlatformKiro:
-		return []string{
-			service.DefaultKiroModelSonnet,
-			service.DefaultKiroModelHaiku,
-			service.DefaultKiroModelOpus,
-			"claude-sonnet-4",
-			"claude-haiku-4.5",
-			"claude-opus-4.5",
-		}
+		return service.KiroDefaultModelIDs()
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))
 		for _, model := range claude.DefaultModels {

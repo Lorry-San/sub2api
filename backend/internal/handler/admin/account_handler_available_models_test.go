@@ -168,12 +168,14 @@ func TestAccountHandlerGetAvailableModels_KiroUsesKiroModelSurface(t *testing.T)
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Data, 3)
-	require.Equal(t, []string{
-		service.DefaultKiroModelSonnet,
-		service.DefaultKiroModelHaiku,
-		service.DefaultKiroModelOpus,
-	}, []string{resp.Data[0].ID, resp.Data[1].ID, resp.Data[2].ID})
+	gotIDs := make([]string, 0, len(resp.Data))
+	for _, model := range resp.Data {
+		gotIDs = append(gotIDs, model.ID)
+	}
+	require.Equal(t, service.KiroDefaultModelIDs(), gotIDs)
+	require.Contains(t, gotIDs, service.DefaultKiroModelOpus46)
+	require.Contains(t, gotIDs, service.DefaultKiroModelOpus47)
+	require.Contains(t, gotIDs, service.DefaultKiroModelOpus48)
 }
 
 func TestAccountHandlerSyncUpstreamModels_ConfigErrorReturnsBadRequest(t *testing.T) {
