@@ -180,6 +180,7 @@
         :show-help="isAnthropic"
         :show-proxy-warning="isAnthropic"
         :show-cookie-option="isAnthropic"
+        :show-refresh-token-option="isKiro"
         :allow-multiple="false"
         :method-label="t('admin.accounts.inputMethod')"
         :platform="isOpenAI ? 'openai' : isGemini ? 'gemini' : isAntigravity ? 'antigravity' : isKiro ? 'kiro' : 'anthropic'"
@@ -189,6 +190,7 @@
         :show-project-id="isGemini && geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
+        @validate-refresh-token="handleValidateRefreshToken"
       />
 
     </div>
@@ -339,8 +341,7 @@ const currentError = computed(() => {
 
 // Computed
 const isManualInputMethod = computed(() => {
-  // OpenAI/Gemini/Antigravity/Kiro always use manual input (no cookie auth option)
-  return isOpenAILike.value || isGemini.value || isAntigravity.value || isKiro.value || oauthFlowRef.value?.inputMethod === 'manual'
+  return (oauthFlowRef.value?.inputMethod || 'manual') === 'manual'
 })
 
 const canExchangeCode = computed(() => {
@@ -446,6 +447,57 @@ const handleGenerateUrl = async () => {
     }
   } else {
     await claudeOAuth.generateAuthUrl(addMethod.value, props.account.proxy_id)
+  }
+}
+
+const handleValidateRefreshToken = async (refreshTokenInput: string) => {
+  if (!props.account || !isKiro.value || !refreshTokenInput.trim()) return
+
+  const refreshToken = refreshTokenInput
+    .split('\n')
+    .map((rt) => rt.trim())
+    .filter((rt) => rt)[0]
+  if (!refreshToken) return
+
+  const startUrl = effectiveKiroStartUrl.value
+  if (kiroAccountType.value === 'iam' && !startUrl) {
+    kiroOAuth.error.value = t('admin.accounts.oauth.kiro.startUrlRequired')
+    appStore.showError(kiroOAuth.error.value)
+    return
+  }
+
+  const credentials = {
+    ...((props.account.credentials || {}) as Record<string, unknown>)
+  }
+  if (startUrl) {
+    credentials.start_url = startUrl
+  }
+  if (kiroAccountType.value === 'iam') {
+    credentials.auth_method = 'idc'
+  }
+
+  const tokenInfo = await kiroOAuth.validateRefreshToken(
+    refreshToken,
+    props.account.proxy_id,
+    credentials,
+    startUrl
+  )
+  if (!tokenInfo) {
+    if (kiroOAuth.error.value) appStore.showError(kiroOAuth.error.value)
+    return
+  }
+
+  try {
+    const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
+      type: 'oauth',
+      credentials: kiroOAuth.buildCredentials(tokenInfo)
+    })
+    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+    emit('reauthorized', updatedAccount)
+    handleClose()
+  } catch (error: any) {
+    kiroOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    appStore.showError(kiroOAuth.error.value)
   }
 }
 
