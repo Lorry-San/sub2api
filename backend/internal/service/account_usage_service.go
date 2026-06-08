@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"math/rand/v2"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"net/url"
 
 	httppool "github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	openaipkg "github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -322,6 +324,14 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64, for
 	// Antigravity 平台：使用 AntigravityQuotaFetcher 获取额度
 	if account.Platform == PlatformAntigravity {
 		usage, err := s.getAntigravityUsage(ctx, account)
+		if err == nil {
+			s.tryClearRecoverableAccountError(ctx, account)
+		}
+		return usage, err
+	}
+
+	if account.Platform == PlatformKiro {
+		usage, err := s.getKiroUsage(ctx, account)
 		if err == nil {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
@@ -828,6 +838,129 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 		now := time.Now()
 		return &UsageInfo{UpdatedAt: &now}, nil
 	}
+	return usage, nil
+}
+
+type kiroUsageResponse struct {
+	SubscriptionInfo struct {
+		SubscriptionTitle string `json:"subscriptionTitle"`
+	} `json:"subscriptionInfo"`
+	UsageBreakdownList []struct {
+		UsageLimitWithPrecision   float64 `json:"usageLimitWithPrecision"`
+		CurrentUsageWithPrecision float64 `json:"currentUsageWithPrecision"`
+		FreeTrialInfo             *struct {
+			UsageLimitWithPrecision   float64 `json:"usageLimitWithPrecision"`
+			CurrentUsageWithPrecision float64 `json:"currentUsageWithPrecision"`
+		} `json:"freeTrialInfo"`
+		Bonuses []struct {
+			UsageLimit   float64 `json:"usageLimit"`
+			CurrentUsage float64 `json:"currentUsage"`
+		} `json:"bonuses"`
+	} `json:"usageBreakdownList"`
+}
+
+func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
+	creds := NewKiroCredentialsFromMap(account.Credentials)
+	if creds == nil {
+		return nil, fmt.Errorf("missing Kiro credentials")
+	}
+	accessToken := strings.TrimSpace(creds.AccessToken)
+	if accessToken == "" {
+		return nil, fmt.Errorf("missing Kiro access token")
+	}
+
+	endpoint := "https://q.us-east-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
+	if creds.AuthMethod == KiroAuthMethodSocial && strings.TrimSpace(creds.ProfileARN) != "" {
+		endpoint += "&profileArn=" + url.QueryEscape(strings.TrimSpace(creds.ProfileARN))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build Kiro usage request: %w", err)
+	}
+	setKiroHeaders(req.Header, accessToken, creds)
+
+	var proxyURL string
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	client := httppool.GetPool().GetHTTPClient(proxyURL, account.ID)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request Kiro usage failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read Kiro usage response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Kiro usage request failed: status=%d body=%s", resp.StatusCode, truncateString(string(raw), 300))
+	}
+
+	var parsed kiroUsageResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("parse Kiro usage response: %w", err)
+	}
+
+	totalLimit := 0.0
+	totalUsage := 0.0
+	freeTrialLimit := 0.0
+	freeTrialUsage := 0.0
+	bonusLimit := 0.0
+	bonusUsage := 0.0
+	for _, breakdown := range parsed.UsageBreakdownList {
+		totalLimit += breakdown.UsageLimitWithPrecision
+		totalUsage += breakdown.CurrentUsageWithPrecision
+		if breakdown.FreeTrialInfo != nil {
+			totalLimit += breakdown.FreeTrialInfo.UsageLimitWithPrecision
+			totalUsage += breakdown.FreeTrialInfo.CurrentUsageWithPrecision
+			freeTrialLimit += breakdown.FreeTrialInfo.UsageLimitWithPrecision
+			freeTrialUsage += breakdown.FreeTrialInfo.CurrentUsageWithPrecision
+		}
+		for _, bonus := range breakdown.Bonuses {
+			totalLimit += bonus.UsageLimit
+			totalUsage += bonus.CurrentUsage
+			bonusLimit += bonus.UsageLimit
+			bonusUsage += bonus.CurrentUsage
+		}
+	}
+
+	now := time.Now()
+	usage := &UsageInfo{
+		Source:    "active",
+		UpdatedAt: &now,
+		ErrorCode: "",
+	}
+
+	extraCredits := []AICredit{}
+	if totalLimit > 0 || totalUsage > 0 {
+		extraCredits = append(extraCredits, AICredit{
+			CreditType: "subscription",
+			Amount:     totalLimit - totalUsage,
+		})
+	}
+	if freeTrialLimit > 0 || freeTrialUsage > 0 {
+		extraCredits = append(extraCredits, AICredit{
+			CreditType: "free_trial",
+			Amount:     freeTrialLimit - freeTrialUsage,
+		})
+	}
+	if bonusLimit > 0 || bonusUsage > 0 {
+		extraCredits = append(extraCredits, AICredit{
+			CreditType: "bonus",
+			Amount:     bonusLimit - bonusUsage,
+		})
+	}
+	if len(extraCredits) > 0 {
+		usage.AICredits = extraCredits
+	}
+	if title := strings.TrimSpace(parsed.SubscriptionInfo.SubscriptionTitle); title != "" {
+		usage.SubscriptionTierRaw = title
+		usage.SubscriptionTier = strings.ToUpper(strings.ReplaceAll(title, " ", "_"))
+	}
+
 	return usage, nil
 }
 

@@ -309,6 +309,32 @@
       <div v-else class="text-xs text-gray-400">-</div>
     </template>
 
+    <template v-else-if="account.platform === 'kiro' && account.type === 'oauth'">
+      <div v-if="loading" class="space-y-1.5">
+        <div class="h-3 w-24 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+        <div class="h-3 w-20 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+      </div>
+      <div v-else-if="error" class="text-xs text-red-500">
+        {{ error }}
+      </div>
+      <div v-else-if="kiroUsageSummary.length > 0" class="space-y-1">
+        <div
+          v-if="usageInfo?.subscription_tier_raw"
+          class="text-[10px] font-medium text-gray-600 dark:text-gray-300"
+        >
+          {{ usageInfo.subscription_tier_raw }}
+        </div>
+        <div
+          v-for="item in kiroUsageSummary"
+          :key="item.key"
+          class="text-[10px] text-gray-500 dark:text-gray-400"
+        >
+          {{ item.label }}: {{ item.value }}
+        </div>
+      </div>
+      <div v-else class="text-xs text-gray-400">-</div>
+    </template>
+
     <!-- Gemini platform: show quota + local usage window -->
     <template v-else-if="account.platform === 'gemini'">
       <!-- Auth Type + Tier Badge (first line) -->
@@ -674,6 +700,30 @@ const aiCreditsDisplay = computed(() => {
   const total = credits.reduce((sum, credit) => sum + (credit.amount ?? 0), 0)
   if (total <= 0) return null
   return total.toFixed(0)
+})
+
+const kiroUsageSummary = computed(() => {
+  if (props.account.platform !== 'kiro') return []
+  const credits = usageInfo.value?.ai_credits || []
+  return credits
+    .filter((credit) => (credit.amount ?? 0) !== 0)
+    .map((credit, index) => {
+      const key = credit.credit_type || `credit_${index}`
+      const rawLabel = credit.credit_type || 'balance'
+      const label =
+        rawLabel === 'subscription'
+          ? 'Subscription'
+          : rawLabel === 'free_trial'
+            ? 'Free trial'
+            : rawLabel === 'bonus'
+              ? 'Bonus'
+              : rawLabel
+      return {
+        key,
+        label,
+        value: `${(credit.amount ?? 0).toFixed(2)}`
+      }
+    })
 })
 
 // Antigravity 账户类型（从 load_code_assist 响应中提取）
