@@ -293,6 +293,11 @@ const openAITestModeOptions = computed(() => [
 ])
 const previewImageUrl = ref('')
 const prioritizedGeminiModels = ['gemini-3.1-flash-image', 'gemini-2.5-flash-image', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-3-pro-preview', 'gemini-2.0-flash']
+const kiroTestModels: ClaudeModel[] = [
+  { id: 'claude-sonnet-4', type: 'model', display_name: 'Claude Sonnet 4', created_at: '' },
+  { id: 'claude-haiku-4.5', type: 'model', display_name: 'Claude Haiku 4.5', created_at: '' },
+  { id: 'claude-opus-4.5', type: 'model', display_name: 'Claude Opus 4.5', created_at: '' }
+]
 const supportsGeminiImageTest = computed(() => {
   const modelID = selectedModelId.value.toLowerCase()
   if (!modelID.startsWith('gemini-') || !modelID.includes('-image')) return false
@@ -347,12 +352,16 @@ const loadAvailableModels = async () => {
   selectedModelId.value = '' // Reset selection before loading
   try {
     const models = await adminAPI.accounts.getAvailableModels(props.account.id)
-    availableModels.value = props.account.platform === 'gemini' || props.account.platform === 'antigravity'
-      ? sortTestModels(models)
-      : models
+    if (props.account.platform === 'kiro') {
+      availableModels.value = kiroTestModels
+    } else {
+      availableModels.value = props.account.platform === 'gemini' || props.account.platform === 'antigravity'
+        ? sortTestModels(models)
+        : models
+    }
     // Default selection by platform
     if (availableModels.value.length > 0) {
-      if (props.account.platform === 'gemini') {
+      if (props.account.platform === 'gemini' || props.account.platform === 'kiro') {
         selectedModelId.value = availableModels.value[0].id
       } else {
         // Try to select Sonnet as default, otherwise use first model
