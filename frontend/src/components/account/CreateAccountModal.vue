@@ -352,6 +352,85 @@
         </div>
       </div>
 
+      <!-- Account Type Selection (Kiro) -->
+      <div v-if="form.platform === 'kiro'">
+        <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
+        <div class="mt-2 grid grid-cols-2 gap-3" data-tour="account-form-type">
+          <button
+            type="button"
+            @click="kiroAccountType = 'builder'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              kiroAccountType === 'builder'
+                ? 'border-cyan-500 bg-cyan-50 dark:bg-cyan-900/20'
+                : 'border-gray-200 hover:border-cyan-300 dark:border-dark-600 dark:hover:border-cyan-700'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                kiroAccountType === 'builder'
+                  ? 'bg-cyan-500 text-white'
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon name="cloud" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">
+                AWS Builder
+              </span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.oauth.kiro.builderDesc') }}
+              </span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            @click="kiroAccountType = 'iam'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              kiroAccountType === 'iam'
+                ? 'border-sky-500 bg-sky-50 dark:bg-sky-900/20'
+                : 'border-gray-200 hover:border-sky-300 dark:border-dark-600 dark:hover:border-sky-700'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                kiroAccountType === 'iam'
+                  ? 'bg-sky-500 text-white'
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon name="key" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">
+                IAM Login
+              </span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.oauth.kiro.iamDesc') }}
+              </span>
+            </div>
+          </button>
+        </div>
+
+        <div v-if="kiroAccountType === 'iam'" class="mt-3">
+          <label class="input-label">
+            {{ t('admin.accounts.oauth.kiro.startUrlLabel') }}
+          </label>
+          <input
+            v-model="kiroStartUrl"
+            type="text"
+            class="input font-mono text-sm"
+            :placeholder="t('admin.accounts.oauth.kiro.startUrlPlaceholder')"
+          />
+          <p class="input-hint">{{ t('admin.accounts.oauth.kiro.startUrlHint') }}</p>
+        </div>
+      </div>
+
       <!-- Account Type Selection (Gemini) -->
       <div v-if="form.platform === 'gemini'">
         <div class="flex items-center justify-between">
@@ -2884,6 +2963,8 @@
         :show-codex-session-import-option="form.platform === 'openai'"
         :platform="form.platform"
         :device-user-code="currentDeviceUserCode"
+        :kiro-account-type="kiroAccountType"
+        :kiro-default-start-url="kiroStartUrl"
         :show-project-id="geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
@@ -3273,6 +3354,9 @@ interface OAuthFlowExposed {
   authCode: string
   oauthState: string
   projectId: string
+  kiroLoginMode: 'device' | 'kiroide'
+  kiroStartUrl: string
+  kiroRedirectUri: string
   sessionKey: string
   refreshToken: string
   sessionToken: string
@@ -3466,6 +3550,8 @@ loadQuotaNotifyGlobal()
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
 const antigravityAccountType = ref<'oauth' | 'upstream'>('oauth') // For antigravity: oauth or upstream
+const kiroAccountType = ref<'builder' | 'iam'>('builder')
+const kiroStartUrl = ref('')
 const upstreamBaseUrl = ref('') // For upstream type: base URL
 const upstreamApiKey = ref('') // For upstream type: API key
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
@@ -3514,6 +3600,10 @@ const openAITextEndpointCapabilityLabel = computed(() => {
     return t('admin.accounts.openai.capabilityChatCompletions')
   }
   return t('admin.accounts.openai.capabilityTextAuto')
+})
+const effectiveKiroStartUrl = computed(() => {
+  if (kiroAccountType.value !== 'iam') return ''
+  return (oauthFlowRef.value?.kiroStartUrl || kiroStartUrl.value || '').trim()
 })
 const openAIEndpointCapabilityOptions = computed<{ value: OpenAIEndpointCapability; label: string }[]>(() => [
   { value: 'chat_completions', label: openAITextEndpointCapabilityLabel.value },
@@ -3758,6 +3848,9 @@ const canExchangeCode = computed(() => {
     return authCode.trim() && antigravityOAuth.sessionId.value && !antigravityOAuth.loading.value
   }
   if (form.platform === 'kiro') {
+    if (oauthFlowRef.value?.kiroLoginMode === 'kiroide') {
+      return authCode.trim() && kiroOAuth.sessionId.value && !kiroOAuth.loading.value
+    }
     return kiroOAuth.sessionId.value && !kiroOAuth.loading.value
   }
   return authCode.trim() && oauth.sessionId.value && !oauth.loading.value
@@ -4280,6 +4373,8 @@ const resetForm = () => {
   customErrorCodeInput.value = null
   interceptWarmupRequests.value = false
   autoPauseOnExpired.value = true
+  kiroAccountType.value = 'builder'
+  kiroStartUrl.value = ''
   openaiPassthroughEnabled.value = false
   openAICompactMode.value = 'auto'
   openAIResponsesMode.value = 'auto'
@@ -4513,6 +4608,10 @@ const handleSubmit = async () => {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
       return
     }
+    if (form.platform === 'kiro' && kiroAccountType.value === 'iam' && !kiroStartUrl.value.trim()) {
+      appStore.showError(t('admin.accounts.oauth.kiro.startUrlRequired'))
+      return
+    }
     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
       step.value = 2
     })
@@ -4739,7 +4838,22 @@ const handleGenerateUrl = async () => {
   } else if (form.platform === 'antigravity') {
     await antigravityOAuth.generateAuthUrl(form.proxy_id)
   } else if (form.platform === 'kiro') {
-    await kiroOAuth.startDeviceFlow(form.proxy_id)
+    const startUrl = effectiveKiroStartUrl.value
+    if (kiroAccountType.value === 'iam' && !startUrl) {
+      kiroOAuth.error.value = t('admin.accounts.oauth.kiro.startUrlRequired')
+      appStore.showError(kiroOAuth.error.value)
+      return
+    }
+    if (oauthFlowRef.value?.kiroLoginMode === 'kiroide') {
+      await kiroOAuth.startKiroIDEAuth(
+        form.proxy_id,
+        undefined,
+        startUrl,
+        oauthFlowRef.value?.kiroRedirectUri
+      )
+    } else {
+      await kiroOAuth.startDeviceFlow(form.proxy_id, undefined, startUrl)
+    }
   } else {
     await oauth.generateAuthUrl(addMethod.value, form.proxy_id)
   }
@@ -5256,7 +5370,18 @@ const handleKiroValidateRT = async (refreshTokenInput: string) => {
   try {
     for (let i = 0; i < refreshTokens.length; i++) {
       try {
-        const tokenInfo = await kiroOAuth.validateRefreshToken(refreshTokens[i], form.proxy_id)
+        const startUrl = effectiveKiroStartUrl.value
+        if (kiroAccountType.value === 'iam' && !startUrl) {
+          failedCount++
+          errors.push(`#${i + 1}: ${t('admin.accounts.oauth.kiro.startUrlRequired')}`)
+          continue
+        }
+        const tokenInfo = await kiroOAuth.validateRefreshToken(
+          refreshTokens[i],
+          form.proxy_id,
+          undefined,
+          startUrl
+        )
         if (!tokenInfo) {
           failedCount++
           errors.push(`#${i + 1}: ${kiroOAuth.error.value || 'Validation failed'}`)
@@ -5398,7 +5523,15 @@ const handleKiroExchange = async () => {
   const sessionId = kiroOAuth.sessionId.value
   if (!sessionId) return
 
-  const tokenInfo = await kiroOAuth.pollDeviceFlow(sessionId, form.proxy_id)
+  const mode = oauthFlowRef.value?.kiroLoginMode || kiroOAuth.authMode.value
+  const tokenInfo = mode === 'kiroide'
+    ? await kiroOAuth.exchangeKiroIDEAuth({
+        callbackUrl: oauthFlowRef.value?.authCode || '',
+        sessionId,
+        state: oauthFlowRef.value?.oauthState || kiroOAuth.state.value,
+        proxyId: form.proxy_id
+      })
+    : await kiroOAuth.pollDeviceFlow(sessionId, form.proxy_id)
   if (!tokenInfo) return
 
   const credentials = kiroOAuth.buildCredentials(tokenInfo)

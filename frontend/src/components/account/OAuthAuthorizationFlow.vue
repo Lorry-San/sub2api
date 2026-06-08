@@ -104,6 +104,24 @@
               {{ t(getOAuthKey('refreshTokenDesc')) }}
             </p>
 
+            <div v-if="showKiroStartUrlInput" class="mb-4">
+              <label
+                class="mb-2 flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300"
+              >
+                <Icon name="link" size="sm" class="text-blue-500" />
+                {{ t('admin.accounts.oauth.kiro.startUrlLabel') }}
+              </label>
+              <input
+                v-model="kiroStartUrlInput"
+                type="text"
+                class="input w-full font-mono text-sm"
+                :placeholder="t('admin.accounts.oauth.kiro.startUrlPlaceholder')"
+              />
+              <p class="mt-1 text-xs text-blue-600 dark:text-blue-400">
+                {{ t('admin.accounts.oauth.kiro.startUrlHint') }}
+              </p>
+            </div>
+
             <!-- Refresh Token Input -->
             <div class="mb-4">
               <label
@@ -396,6 +414,63 @@
             {{ oauthFollowSteps }}
           </p>
 
+          <div v-if="platform === 'kiro'" class="rounded-lg border border-blue-300 bg-white/80 p-4 dark:border-blue-600 dark:bg-gray-800/80">
+            <label class="mb-2 block text-sm font-medium text-blue-800 dark:text-blue-300">
+              {{ t('admin.accounts.oauth.kiro.loginModeLabel') }}
+            </label>
+            <div class="flex flex-wrap gap-4">
+              <label class="flex cursor-pointer items-center gap-2">
+                <input
+                  v-model="kiroLoginMode"
+                  type="radio"
+                  value="device"
+                  class="text-blue-600 focus:ring-blue-500"
+                />
+                <span class="text-sm text-blue-900 dark:text-blue-200">
+                  {{ t('admin.accounts.oauth.kiro.deviceLogin') }}
+                </span>
+              </label>
+              <label class="flex cursor-pointer items-center gap-2">
+                <input
+                  v-model="kiroLoginMode"
+                  type="radio"
+                  value="kiroide"
+                  class="text-blue-600 focus:ring-blue-500"
+                />
+                <span class="text-sm text-blue-900 dark:text-blue-200">
+                  {{ t('admin.accounts.oauth.kiro.kiroIDELogin') }}
+                </span>
+              </label>
+            </div>
+            <div class="mt-3 space-y-3">
+              <div v-if="showKiroStartUrlInput">
+                <label class="input-label">
+                  {{ t('admin.accounts.oauth.kiro.startUrlLabel') }}
+                </label>
+                <input
+                  v-model="kiroStartUrlInput"
+                  type="text"
+                  class="input w-full font-mono text-sm"
+                  :placeholder="t('admin.accounts.oauth.kiro.startUrlPlaceholder')"
+                />
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.oauth.kiro.startUrlHint') }}
+                </p>
+              </div>
+              <div v-if="kiroLoginMode === 'kiroide'">
+                <label class="input-label">
+                  {{ t('admin.accounts.oauth.kiro.redirectUriLabel') }}
+                </label>
+                <input
+                  v-model="kiroRedirectUriInput"
+                  type="text"
+                  class="input w-full font-mono text-sm"
+                  placeholder="http://localhost:3128"
+                />
+              </div>
+            </div>
+          </div>
+
           <!-- Step 1: Generate Auth URL -->
           <div
             class="rounded-lg border border-blue-300 bg-white/80 p-4 dark:border-blue-600 dark:bg-gray-800/80"
@@ -503,7 +578,7 @@
                     </button>
                   </div>
                   <div
-                    v-if="isDeviceFlow && deviceUserCode"
+                    v-if="isKiroDeviceFlow && deviceUserCode"
                     class="rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-700 dark:bg-blue-900/20"
                   >
                     <label class="mb-2 block text-xs font-medium uppercase text-blue-700 dark:text-blue-300">
@@ -598,7 +673,7 @@
                   class="mb-3 text-sm text-blue-700 dark:text-blue-300"
                   v-text="oauthAuthCodeDesc"
                 ></p>
-                <div v-if="!isDeviceFlow">
+                <div v-if="!isKiroDeviceFlow">
                   <label class="input-label">
                     <Icon name="key" size="sm" class="mr-1 inline text-blue-500" />
                     {{ oauthAuthCode }}
@@ -679,6 +754,8 @@ interface Props {
   platform?: AccountPlatform // Platform type for different UI/text
   showProjectId?: boolean // New prop to control project ID visibility
   deviceUserCode?: string
+  kiroAccountType?: 'builder' | 'iam'
+  kiroDefaultStartUrl?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -698,7 +775,9 @@ const props = withDefaults(defineProps<Props>(), {
   showCodexSessionImportOption: false,
   platform: 'anthropic',
   showProjectId: true,
-  deviceUserCode: ''
+  deviceUserCode: '',
+  kiroAccountType: 'builder',
+  kiroDefaultStartUrl: ''
 })
 
 const emit = defineEmits<{
@@ -716,7 +795,8 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const isOpenAI = computed(() => props.platform === 'openai')
-const isDeviceFlow = computed(() => props.platform === 'kiro')
+const isKiroDeviceFlow = computed(() => props.platform === 'kiro' && kiroLoginMode.value === 'device')
+const showKiroStartUrlInput = computed(() => props.platform === 'kiro' && props.kiroAccountType === 'iam')
 
 // Get translation key based on platform
 const getOAuthKey = (key: string) => {
@@ -730,15 +810,51 @@ const getOAuthKey = (key: string) => {
 // Computed translations for current platform
 const oauthTitle = computed(() => t(getOAuthKey('title')))
 const oauthFollowSteps = computed(() => t(getOAuthKey('followSteps')))
-const oauthStep1GenerateUrl = computed(() => t(getOAuthKey('step1GenerateUrl')))
-const oauthGenerateAuthUrl = computed(() => t(getOAuthKey('generateAuthUrl')))
-const oauthStep2OpenUrl = computed(() => t(getOAuthKey('step2OpenUrl')))
-const oauthOpenUrlDesc = computed(() => t(getOAuthKey('openUrlDesc')))
-const oauthStep3EnterCode = computed(() => t(getOAuthKey('step3EnterCode')))
-const oauthAuthCodeDesc = computed(() => t(getOAuthKey('authCodeDesc')))
-const oauthAuthCode = computed(() => t(getOAuthKey('authCode')))
-const oauthAuthCodePlaceholder = computed(() => t(getOAuthKey('authCodePlaceholder')))
-const oauthAuthCodeHint = computed(() => t(getOAuthKey('authCodeHint')))
+const oauthStep1GenerateUrl = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEStep1GenerateUrl')
+    : t(getOAuthKey('step1GenerateUrl'))
+)
+const oauthGenerateAuthUrl = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEGenerateAuthUrl')
+    : t(getOAuthKey('generateAuthUrl'))
+)
+const oauthStep2OpenUrl = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEStep2OpenUrl')
+    : t(getOAuthKey('step2OpenUrl'))
+)
+const oauthOpenUrlDesc = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEOpenUrlDesc')
+    : t(getOAuthKey('openUrlDesc'))
+)
+const oauthStep3EnterCode = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEStep3EnterCode')
+    : t(getOAuthKey('step3EnterCode'))
+)
+const oauthAuthCodeDesc = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEAuthCodeDesc')
+    : t(getOAuthKey('authCodeDesc'))
+)
+const oauthAuthCode = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEAuthCode')
+    : t(getOAuthKey('authCode'))
+)
+const oauthAuthCodePlaceholder = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEAuthCodePlaceholder')
+    : t(getOAuthKey('authCodePlaceholder'))
+)
+const oauthAuthCodeHint = computed(() =>
+  props.platform === 'kiro' && kiroLoginMode.value === 'kiroide'
+    ? t('admin.accounts.oauth.kiro.kiroIDEAuthCodeHint')
+    : t(getOAuthKey('authCodeHint'))
+)
 const oauthImportantNotice = computed(() => {
   if (props.platform === 'openai') return t('admin.accounts.oauth.openai.importantNotice')
   if (props.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.importantNotice')
@@ -755,6 +871,9 @@ const codexSessionInput = ref('')
 const showHelpDialog = ref(false)
 const oauthState = ref('')
 const projectId = ref('')
+const kiroLoginMode = ref<'device' | 'kiroide'>('device')
+const kiroStartUrlInput = ref('')
+const kiroRedirectUriInput = ref('http://localhost:3128')
 
 // Computed: show method selection when either cookie or refresh token option is enabled
 const showMethodSelection = computed(() => props.showCookieOption || props.showRefreshTokenOption || props.showMobileRefreshTokenOption || props.showSessionTokenOption || props.showAccessTokenOption || props.showCodexSessionImportOption)
@@ -793,10 +912,41 @@ watch(inputMethod, (newVal) => {
   emit('update:inputMethod', newVal)
 })
 
-// Auto-extract code from callback URL (OpenAI/Gemini/Antigravity)
+watch(
+  () => props.kiroDefaultStartUrl,
+  (newVal) => {
+    if (props.platform === 'kiro' && !kiroStartUrlInput.value.trim()) {
+      kiroStartUrlInput.value = newVal || ''
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => props.kiroAccountType,
+  (newVal) => {
+    if (props.platform !== 'kiro') return
+    if (newVal === 'builder') {
+      kiroStartUrlInput.value = ''
+    } else if (!kiroStartUrlInput.value.trim()) {
+      kiroStartUrlInput.value = props.kiroDefaultStartUrl || ''
+    }
+  },
+  { immediate: true }
+)
+
+watch(kiroLoginMode, () => {
+  if (props.platform === 'kiro') {
+    authCodeInput.value = ''
+    oauthState.value = ''
+  }
+})
+
+// Auto-extract code from callback URL (OpenAI/Gemini/Antigravity/KiroIDE)
 // e.g., http://localhost:8085/callback?code=xxx...&state=...
 watch(authCodeInput, (newVal) => {
-  if (props.platform !== 'openai' && props.platform !== 'gemini' && props.platform !== 'antigravity') return
+  if (props.platform !== 'openai' && props.platform !== 'gemini' && props.platform !== 'antigravity' && props.platform !== 'kiro') return
+  if (props.platform === 'kiro' && kiroLoginMode.value !== 'kiroide') return
 
   const trimmed = newVal.trim()
   // Check if it looks like a URL with code parameter
@@ -806,10 +956,10 @@ watch(authCodeInput, (newVal) => {
       const url = new URL(trimmed)
       const code = url.searchParams.get('code')
       const stateParam = url.searchParams.get('state')
-      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity') && stateParam) {
+      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity' || props.platform === 'kiro') && stateParam) {
         oauthState.value = stateParam
       }
-      if (code && code !== trimmed) {
+      if (code && code !== trimmed && props.platform !== 'kiro') {
         // Replace the input with just the code
         authCodeInput.value = code
       }
@@ -817,10 +967,10 @@ watch(authCodeInput, (newVal) => {
       // If URL parsing fails, try regex extraction
       const match = trimmed.match(/[?&]code=([^&]+)/)
       const stateMatch = trimmed.match(/[?&]state=([^&]+)/)
-      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity') && stateMatch && stateMatch[1]) {
+      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity' || props.platform === 'kiro') && stateMatch && stateMatch[1]) {
         oauthState.value = stateMatch[1]
       }
-      if (match && match[1] && match[1] !== trimmed) {
+      if (match && match[1] && match[1] !== trimmed && props.platform !== 'kiro') {
         authCodeInput.value = match[1]
       }
     }
@@ -876,6 +1026,9 @@ defineExpose({
   authCode: authCodeInput,
   oauthState,
   projectId,
+  kiroLoginMode,
+  kiroStartUrl: kiroStartUrlInput,
+  kiroRedirectUri: kiroRedirectUriInput,
   sessionKey: sessionKeyInput,
   refreshToken: refreshTokenInput,
   sessionToken: sessionTokenInput,
@@ -885,6 +1038,9 @@ defineExpose({
     authCodeInput.value = ''
     oauthState.value = ''
     projectId.value = ''
+    kiroLoginMode.value = 'device'
+    kiroStartUrlInput.value = ''
+    kiroRedirectUriInput.value = 'http://localhost:3128'
     sessionKeyInput.value = ''
     refreshTokenInput.value = ''
     sessionTokenInput.value = ''

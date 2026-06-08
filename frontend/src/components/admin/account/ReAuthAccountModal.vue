@@ -120,6 +120,56 @@
         </div>
       </div>
 
+      <div v-if="isKiro" class="rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-dark-600 dark:bg-dark-700">
+        <div class="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+          {{ t('admin.accounts.accountType') }}
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            @click="kiroAccountType = 'builder'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              kiroAccountType === 'builder'
+                ? 'border-cyan-500 bg-cyan-50 dark:bg-cyan-900/20'
+                : 'border-gray-200 hover:border-cyan-300 dark:border-dark-600 dark:hover:border-cyan-700'
+            ]"
+          >
+            <Icon name="cloud" size="sm" />
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">AWS Builder</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.oauth.kiro.builderDesc') }}</span>
+            </div>
+          </button>
+          <button
+            type="button"
+            @click="kiroAccountType = 'iam'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              kiroAccountType === 'iam'
+                ? 'border-sky-500 bg-sky-50 dark:bg-sky-900/20'
+                : 'border-gray-200 hover:border-sky-300 dark:border-dark-600 dark:hover:border-sky-700'
+            ]"
+          >
+            <Icon name="key" size="sm" />
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">IAM Login</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.oauth.kiro.iamDesc') }}</span>
+            </div>
+          </button>
+        </div>
+        <div v-if="kiroAccountType === 'iam'" class="mt-3">
+          <label class="input-label">{{ t('admin.accounts.oauth.kiro.startUrlLabel') }}</label>
+          <input
+            v-model="kiroStartUrl"
+            type="text"
+            class="input font-mono text-sm"
+            :placeholder="t('admin.accounts.oauth.kiro.startUrlPlaceholder')"
+          />
+          <p class="input-hint">{{ t('admin.accounts.oauth.kiro.startUrlHint') }}</p>
+        </div>
+      </div>
+
       <OAuthAuthorizationFlow
         ref="oauthFlowRef"
         :add-method="addMethod"
@@ -134,6 +184,8 @@
         :method-label="t('admin.accounts.inputMethod')"
         :platform="isOpenAI ? 'openai' : isGemini ? 'gemini' : isAntigravity ? 'antigravity' : isKiro ? 'kiro' : 'anthropic'"
         :device-user-code="isKiro ? kiroOAuth.userCode.value : ''"
+        :kiro-account-type="kiroAccountType"
+        :kiro-default-start-url="kiroStartUrl"
         :show-project-id="isGemini && geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
@@ -209,6 +261,9 @@ interface OAuthFlowExposed {
   authCode: string
   oauthState: string
   projectId: string
+  kiroLoginMode: 'device' | 'kiroide'
+  kiroStartUrl: string
+  kiroRedirectUri: string
   sessionKey: string
   inputMethod: AuthInputMethod
   reset: () => void
@@ -241,6 +296,8 @@ const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
 // State
 const addMethod = ref<AddMethod>('oauth')
 const geminiOAuthType = ref<'code_assist' | 'google_one' | 'ai_studio'>('code_assist')
+const kiroAccountType = ref<'builder' | 'iam'>('builder')
+const kiroStartUrl = ref('')
 
 // Computed - check platform
 const isOpenAI = computed(() => props.account?.platform === 'openai')
@@ -290,8 +347,18 @@ const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
   const sessionId = currentSessionId.value
   const loading = currentLoading.value
-  if (isKiro.value) return Boolean(sessionId) && !loading
+  if (isKiro.value) {
+    if (oauthFlowRef.value?.kiroLoginMode === 'kiroide') {
+      return authCode.trim() && sessionId && !loading
+    }
+    return Boolean(sessionId) && !loading
+  }
   return authCode.trim() && sessionId && !loading
+})
+
+const effectiveKiroStartUrl = computed(() => {
+  if (kiroAccountType.value !== 'iam') return ''
+  return (oauthFlowRef.value?.kiroStartUrl || kiroStartUrl.value || '').trim()
 })
 
 // Watchers
@@ -315,6 +382,15 @@ watch(
               ? 'ai_studio'
               : 'code_assist'
       }
+      if (isKiro.value) {
+        const creds = (props.account.credentials || {}) as Record<string, unknown>
+        const existingStartUrl = typeof creds.start_url === 'string' ? creds.start_url.trim() : ''
+        kiroStartUrl.value = existingStartUrl
+        kiroAccountType.value =
+          existingStartUrl && existingStartUrl !== 'https://view.awsapps.com/start'
+            ? 'iam'
+            : 'builder'
+      }
     } else {
       resetState()
     }
@@ -325,6 +401,8 @@ watch(
 const resetState = () => {
   addMethod.value = 'oauth'
   geminiOAuthType.value = 'code_assist'
+  kiroAccountType.value = 'builder'
+  kiroStartUrl.value = ''
   claudeOAuth.resetState()
   openaiOAuth.resetState()
   geminiOAuth.resetState()
@@ -350,7 +428,22 @@ const handleGenerateUrl = async () => {
   } else if (isAntigravity.value) {
     await antigravityOAuth.generateAuthUrl(props.account.proxy_id)
   } else if (isKiro.value) {
-    await kiroOAuth.startDeviceFlow(props.account.proxy_id)
+    const startUrl = effectiveKiroStartUrl.value
+    if (kiroAccountType.value === 'iam' && !startUrl) {
+      kiroOAuth.error.value = t('admin.accounts.oauth.kiro.startUrlRequired')
+      appStore.showError(kiroOAuth.error.value)
+      return
+    }
+    if (oauthFlowRef.value?.kiroLoginMode === 'kiroide') {
+      await kiroOAuth.startKiroIDEAuth(
+        props.account.proxy_id,
+        undefined,
+        startUrl,
+        oauthFlowRef.value?.kiroRedirectUri
+      )
+    } else {
+      await kiroOAuth.startDeviceFlow(props.account.proxy_id, undefined, startUrl)
+    }
   } else {
     await claudeOAuth.generateAuthUrl(addMethod.value, props.account.proxy_id)
   }
@@ -469,7 +562,15 @@ const handleExchangeCode = async () => {
     const sessionId = kiroOAuth.sessionId.value
     if (!sessionId) return
 
-    const tokenInfo = await kiroOAuth.pollDeviceFlow(sessionId, props.account.proxy_id)
+    const mode = oauthFlowRef.value?.kiroLoginMode || kiroOAuth.authMode.value
+    const tokenInfo = mode === 'kiroide'
+      ? await kiroOAuth.exchangeKiroIDEAuth({
+          callbackUrl: authCode.trim(),
+          sessionId,
+          state: oauthFlowRef.value?.oauthState || kiroOAuth.state.value,
+          proxyId: props.account.proxy_id
+        })
+      : await kiroOAuth.pollDeviceFlow(sessionId, props.account.proxy_id)
     if (!tokenInfo) return
 
     const credentials = kiroOAuth.buildCredentials(tokenInfo)

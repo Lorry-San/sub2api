@@ -12,6 +12,10 @@ export function useKiroOAuth() {
   const userCode = ref('')
   const sessionId = ref('')
   const region = ref('')
+  const state = ref('')
+  const authMode = ref<'device' | 'kiroide'>('device')
+  const startUrl = ref('')
+  const redirectUri = ref('')
   const loading = ref(false)
   const error = ref('')
 
@@ -20,24 +24,34 @@ export function useKiroOAuth() {
     userCode.value = ''
     sessionId.value = ''
     region.value = ''
+    state.value = ''
+    authMode.value = 'device'
+    startUrl.value = ''
+    redirectUri.value = ''
     loading.value = false
     error.value = ''
   }
 
   const startDeviceFlow = async (
     proxyId: number | null | undefined,
-    selectedRegion?: string
+    selectedRegion?: string,
+    selectedStartUrl?: string
   ): Promise<boolean> => {
     loading.value = true
     authUrl.value = ''
     userCode.value = ''
     sessionId.value = ''
     region.value = ''
+    state.value = ''
+    authMode.value = 'device'
+    startUrl.value = selectedStartUrl?.trim() || ''
+    redirectUri.value = ''
     error.value = ''
 
     try {
       const payload: Record<string, unknown> = {}
       if (selectedRegion) payload.region = selectedRegion
+      if (selectedStartUrl?.trim()) payload.start_url = selectedStartUrl.trim()
       if (proxyId) payload.proxy_id = proxyId
 
       const response = await adminAPI.kiro.startDeviceFlow(payload as any)
@@ -45,9 +59,51 @@ export function useKiroOAuth() {
       userCode.value = response.user_code
       sessionId.value = response.session_id
       region.value = response.region
+      startUrl.value = response.start_url || selectedStartUrl?.trim() || ''
       return true
     } catch (err: any) {
       error.value = err.response?.data?.detail || t('admin.accounts.oauth.kiro.failedToStart')
+      appStore.showError(error.value)
+      return false
+    } finally {
+      loading.value = false
+    }
+  }
+
+  const startKiroIDEAuth = async (
+    proxyId: number | null | undefined,
+    selectedRegion?: string,
+    selectedStartUrl?: string,
+    selectedRedirectUri?: string
+  ): Promise<boolean> => {
+    loading.value = true
+    authUrl.value = ''
+    userCode.value = ''
+    sessionId.value = ''
+    region.value = ''
+    state.value = ''
+    authMode.value = 'kiroide'
+    startUrl.value = selectedStartUrl?.trim() || ''
+    redirectUri.value = selectedRedirectUri?.trim() || ''
+    error.value = ''
+
+    try {
+      const payload: Record<string, unknown> = {}
+      if (selectedRegion) payload.region = selectedRegion
+      if (selectedStartUrl?.trim()) payload.start_url = selectedStartUrl.trim()
+      if (selectedRedirectUri?.trim()) payload.redirect_uri = selectedRedirectUri.trim()
+      if (proxyId) payload.proxy_id = proxyId
+
+      const response = await adminAPI.kiro.startKiroIDEAuth(payload as any)
+      authUrl.value = response.auth_url
+      sessionId.value = response.session_id
+      region.value = response.region
+      state.value = response.state
+      startUrl.value = response.start_url || selectedStartUrl?.trim() || ''
+      redirectUri.value = response.redirect_uri || selectedRedirectUri?.trim() || ''
+      return true
+    } catch (err: any) {
+      error.value = err.response?.data?.detail || t('admin.accounts.oauth.kiro.failedToStartKiroIDE')
       appStore.showError(error.value)
       return false
     } finally {
@@ -92,7 +148,8 @@ export function useKiroOAuth() {
   const validateRefreshToken = async (
     refreshToken: string,
     proxyId?: number | null,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
+    selectedStartUrl?: string
   ): Promise<KiroTokenInfo | null> => {
     if (!refreshToken.trim()) {
       error.value = t('admin.accounts.oauth.kiro.pleaseEnterRefreshToken')
@@ -103,9 +160,52 @@ export function useKiroOAuth() {
     error.value = ''
 
     try {
-      return await adminAPI.kiro.refreshKiroToken(refreshToken.trim(), proxyId, credentials)
+      return await adminAPI.kiro.refreshKiroToken(
+        refreshToken.trim(),
+        proxyId,
+        credentials,
+        selectedStartUrl?.trim()
+      )
     } catch (err: any) {
       error.value = err.response?.data?.detail || t('admin.accounts.oauth.kiro.failedToValidateRT')
+      return null
+    } finally {
+      loading.value = false
+    }
+  }
+
+  const exchangeKiroIDEAuth = async (params: {
+    callbackUrl?: string
+    code?: string
+    sessionId: string
+    state?: string
+    proxyId?: number | null
+  }): Promise<KiroTokenInfo | null> => {
+    if (!params.sessionId) {
+      error.value = t('admin.accounts.oauth.kiro.missingSession')
+      return null
+    }
+    if (!params.callbackUrl?.trim() && !params.code?.trim()) {
+      error.value = t('admin.accounts.oauth.kiro.missingCallbackUrl')
+      return null
+    }
+
+    loading.value = true
+    error.value = ''
+
+    try {
+      const payload: Record<string, unknown> = {
+        session_id: params.sessionId
+      }
+      if (params.callbackUrl?.trim()) payload.callback_url = params.callbackUrl.trim()
+      if (params.code?.trim()) payload.code = params.code.trim()
+      if (params.state?.trim()) payload.state = params.state.trim()
+      if (params.proxyId) payload.proxy_id = params.proxyId
+
+      return await adminAPI.kiro.exchangeKiroIDEAuth(payload as any)
+    } catch (err: any) {
+      error.value = err.response?.data?.detail || t('admin.accounts.oauth.kiro.failedToExchangeKiroIDE')
+      appStore.showError(error.value)
       return null
     } finally {
       loading.value = false
@@ -142,11 +242,17 @@ export function useKiroOAuth() {
     userCode,
     sessionId,
     region,
+    state,
+    authMode,
+    startUrl,
+    redirectUri,
     loading,
     error,
     resetState,
     startDeviceFlow,
+    startKiroIDEAuth,
     pollDeviceFlow,
+    exchangeKiroIDEAuth,
     validateRefreshToken,
     buildCredentials
   }

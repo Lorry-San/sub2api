@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,8 +19,11 @@ import (
 )
 
 const (
-	kiroStartURL        = "https://view.awsapps.com/start"
-	kiroDeviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+	kiroStartURL               = "https://view.awsapps.com/start"
+	kiroDeviceGrantType        = "urn:ietf:params:oauth:grant-type:device_code"
+	kiroIDESignInURL           = "https://app.kiro.dev/signin"
+	kiroIDEDefaultRedirectURI  = "http://localhost:3128"
+	kiroIDEDefaultRedirectFrom = "KiroIDE"
 )
 
 var kiroScopes = []string{
@@ -31,14 +37,16 @@ var kiroScopes = []string{
 type KiroOAuthService struct {
 	proxyRepo ProxyRepository
 
-	mu       sync.Mutex
-	sessions map[string]*KiroDeviceSession
+	mu          sync.Mutex
+	sessions    map[string]*KiroDeviceSession
+	ideSessions map[string]*KiroIDEAuthSession
 }
 
 func NewKiroOAuthService(proxyRepo ProxyRepository) *KiroOAuthService {
 	return &KiroOAuthService{
-		proxyRepo: proxyRepo,
-		sessions:  make(map[string]*KiroDeviceSession),
+		proxyRepo:   proxyRepo,
+		sessions:    make(map[string]*KiroDeviceSession),
+		ideSessions: make(map[string]*KiroIDEAuthSession),
 	}
 }
 
@@ -51,8 +59,22 @@ type KiroDeviceSession struct {
 	Interval        int
 	ExpiresAt       time.Time
 	Region          string
+	StartURL        string
 	ProxyURL        string
 	StartedAt       time.Time
+}
+
+type KiroIDEAuthSession struct {
+	State         string
+	CodeVerifier  string
+	CodeChallenge string
+	RedirectURI   string
+	RedirectFrom  string
+	ExpiresAt     time.Time
+	Region        string
+	StartURL      string
+	ProxyURL      string
+	StartedAt     time.Time
 }
 
 type KiroDeviceStartResult struct {
@@ -62,6 +84,19 @@ type KiroDeviceStartResult struct {
 	ExpiresIn       int64  `json:"expires_in"`
 	Interval        int    `json:"interval"`
 	Region          string `json:"region"`
+	StartURL        string `json:"start_url"`
+}
+
+type KiroIDEAuthStartResult struct {
+	SessionID     string `json:"session_id"`
+	AuthURL       string `json:"auth_url"`
+	State         string `json:"state"`
+	CodeChallenge string `json:"code_challenge"`
+	RedirectURI   string `json:"redirect_uri"`
+	RedirectFrom  string `json:"redirect_from"`
+	ExpiresIn     int64  `json:"expires_in"`
+	Region        string `json:"region"`
+	StartURL      string `json:"start_url"`
 }
 
 type KiroDevicePollResult struct {
@@ -86,8 +121,12 @@ type KiroTokenInfo struct {
 	LastRefresh  string `json:"last_refresh,omitempty"`
 }
 
-func (s *KiroOAuthService) StartDeviceFlow(ctx context.Context, region string, proxyID *int64) (*KiroDeviceStartResult, error) {
+func (s *KiroOAuthService) StartDeviceFlow(ctx context.Context, region, startURL string, proxyID *int64) (*KiroDeviceStartResult, error) {
 	region = firstNonEmpty(region, DefaultKiroRegion)
+	normalizedStartURL, err := normalizeKiroStartURL(startURL)
+	if err != nil {
+		return nil, err
+	}
 	proxyURL := s.resolveProxyURL(ctx, proxyID)
 	client := newKiroHTTPClient(proxyURL)
 	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
@@ -97,7 +136,7 @@ func (s *KiroOAuthService) StartDeviceFlow(ctx context.Context, region string, p
 		"clientType": "public",
 		"scopes":     kiroScopes,
 		"grantTypes": []string{kiroDeviceGrantType, "refresh_token"},
-		"issuerUrl":  kiroStartURL,
+		"issuerUrl":  normalizedStartURL,
 	}
 	regResp, err := s.postJSON(ctx, client, oidcBase+"/client/register", regBody, map[string]string{"Content-Type": "application/json"})
 	if err != nil {
@@ -112,7 +151,7 @@ func (s *KiroOAuthService) StartDeviceFlow(ctx context.Context, region string, p
 	authBody := map[string]any{
 		"clientId":     clientID,
 		"clientSecret": clientSecret,
-		"startUrl":     kiroStartURL,
+		"startUrl":     normalizedStartURL,
 	}
 	authResp, err := s.postJSON(ctx, client, oidcBase+"/device_authorization", authBody, map[string]string{"Content-Type": "application/json"})
 	if err != nil {
@@ -140,6 +179,7 @@ func (s *KiroOAuthService) StartDeviceFlow(ctx context.Context, region string, p
 		Interval:        interval,
 		ExpiresAt:       time.Now().Add(time.Duration(expiresIn) * time.Second),
 		Region:          region,
+		StartURL:        normalizedStartURL,
 		ProxyURL:        proxyURL,
 		StartedAt:       time.Now(),
 	}
@@ -154,6 +194,70 @@ func (s *KiroOAuthService) StartDeviceFlow(ctx context.Context, region string, p
 		ExpiresIn:       expiresIn,
 		Interval:        interval,
 		Region:          region,
+		StartURL:        normalizedStartURL,
+	}, nil
+}
+
+func (s *KiroOAuthService) StartKiroIDEAuth(ctx context.Context, region, startURL, redirectURI, redirectFrom string, proxyID *int64) (*KiroIDEAuthStartResult, error) {
+	region = firstNonEmpty(region, DefaultKiroRegion)
+	normalizedStartURL, err := normalizeKiroStartURL(startURL)
+	if err != nil {
+		return nil, err
+	}
+	redirectURI, err = normalizeKiroRedirectURI(redirectURI)
+	if err != nil {
+		return nil, err
+	}
+	redirectFrom = firstNonEmpty(strings.TrimSpace(redirectFrom), kiroIDEDefaultRedirectFrom)
+
+	state, err := randomKiroURLToken(32)
+	if err != nil {
+		return nil, err
+	}
+	codeVerifier, err := randomKiroURLToken(64)
+	if err != nil {
+		return nil, err
+	}
+	codeChallenge := kiroCodeChallenge(codeVerifier)
+	sessionID, err := randomKiroHex(24)
+	if err != nil {
+		return nil, err
+	}
+	expiresIn := int64(600)
+	proxyURL := s.resolveProxyURL(ctx, proxyID)
+	session := &KiroIDEAuthSession{
+		State:         state,
+		CodeVerifier:  codeVerifier,
+		CodeChallenge: codeChallenge,
+		RedirectURI:   redirectURI,
+		RedirectFrom:  redirectFrom,
+		ExpiresAt:     time.Now().Add(time.Duration(expiresIn) * time.Second),
+		Region:        region,
+		StartURL:      normalizedStartURL,
+		ProxyURL:      proxyURL,
+		StartedAt:     time.Now(),
+	}
+
+	s.mu.Lock()
+	s.ideSessions[sessionID] = session
+	s.mu.Unlock()
+
+	authURL, err := buildKiroIDESignInURL(state, codeChallenge, redirectURI, redirectFrom, normalizedStartURL)
+	if err != nil {
+		s.CancelKiroIDEAuth(sessionID)
+		return nil, err
+	}
+
+	return &KiroIDEAuthStartResult{
+		SessionID:     sessionID,
+		AuthURL:       authURL,
+		State:         state,
+		CodeChallenge: codeChallenge,
+		RedirectURI:   redirectURI,
+		RedirectFrom:  redirectFrom,
+		ExpiresIn:     expiresIn,
+		Region:        region,
+		StartURL:      normalizedStartURL,
 	}, nil
 }
 
@@ -196,7 +300,7 @@ func (s *KiroOAuthService) PollDeviceFlow(ctx context.Context, sessionID string,
 			Region:       session.Region,
 			IDCRegion:    session.Region,
 			AuthMethod:   KiroAuthMethodIDC,
-			StartURL:     kiroStartURL,
+			StartURL:     firstNonEmpty(session.StartURL, kiroStartURL),
 		})
 		if strings.TrimSpace(tokenInfo.AccessToken) == "" {
 			return nil, fmt.Errorf("Kiro device token response missing access_token")
@@ -223,6 +327,76 @@ func (s *KiroOAuthService) PollDeviceFlow(ctx context.Context, sessionID string,
 	}
 }
 
+type KiroIDEExchangeInput struct {
+	SessionID   string
+	Code        string
+	State       string
+	CallbackURL string
+	ProxyID     *int64
+}
+
+func (s *KiroOAuthService) ExchangeKiroIDEAuth(ctx context.Context, input *KiroIDEExchangeInput) (*KiroTokenInfo, error) {
+	if input == nil {
+		return nil, fmt.Errorf("missing KiroIDE exchange input")
+	}
+	sessionID := strings.TrimSpace(input.SessionID)
+	session := s.getKiroIDESession(sessionID)
+	if session == nil {
+		return nil, fmt.Errorf("KiroIDE authorization session not found or expired")
+	}
+
+	code, state, err := parseKiroIDECallback(input.Code, input.State, input.CallbackURL)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(state) == "" {
+		return nil, fmt.Errorf("KiroIDE callback state is required")
+	}
+	if subtle.ConstantTimeCompare([]byte(state), []byte(session.State)) != 1 {
+		s.CancelKiroIDEAuth(sessionID)
+		return nil, fmt.Errorf("KiroIDE callback state mismatch")
+	}
+
+	proxyURL := session.ProxyURL
+	if input.ProxyID != nil {
+		proxyURL = s.resolveProxyURL(ctx, input.ProxyID)
+	}
+	body := map[string]any{
+		"grant_type":    "authorization_code",
+		"code":          code,
+		"redirect_uri":  session.RedirectURI,
+		"code_verifier": session.CodeVerifier,
+	}
+	headers := map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json, text/plain, */*",
+		"User-Agent":   fmt.Sprintf("KiroIDE-%s-%s", DefaultKiroVersion, (&KiroCredentials{StartURL: session.StartURL}).MachineID()),
+	}
+	tokenURL := fmt.Sprintf("https://prod.%s.auth.desktop.kiro.dev/oauth/token", firstNonEmpty(session.Region, DefaultKiroRegion))
+	data, status, err := postJSONRaw(ctx, newKiroHTTPClient(proxyURL), tokenURL, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("KiroIDE token exchange failed: status=%d body=%s", status, truncateString(string(data), 300))
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, fmt.Errorf("parse KiroIDE token response: %w", err)
+	}
+	s.CancelKiroIDEAuth(sessionID)
+	tokenInfo := kiroTokenInfoFromResponse(parsed, &KiroCredentials{
+		Region:     firstNonEmpty(session.Region, DefaultKiroRegion),
+		IDCRegion:  firstNonEmpty(session.Region, DefaultKiroRegion),
+		AuthMethod: KiroAuthMethodSocial,
+		StartURL:   firstNonEmpty(session.StartURL, kiroStartURL),
+	})
+	if strings.TrimSpace(tokenInfo.AccessToken) == "" {
+		return nil, fmt.Errorf("KiroIDE token response missing access_token")
+	}
+	return tokenInfo, nil
+}
+
 func (s *KiroOAuthService) CancelDeviceFlow(sessionID string) bool {
 	sessionID = strings.TrimSpace(sessionID)
 	s.mu.Lock()
@@ -234,11 +408,29 @@ func (s *KiroOAuthService) CancelDeviceFlow(sessionID string) bool {
 	return true
 }
 
+func (s *KiroOAuthService) CancelKiroIDEAuth(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.ideSessions[sessionID]; !ok {
+		return false
+	}
+	delete(s.ideSessions, sessionID)
+	return true
+}
+
 func (s *KiroOAuthService) ValidateRefreshToken(ctx context.Context, refreshToken string, proxyID *int64, credentials map[string]any) (*KiroTokenInfo, error) {
 	creds := NewKiroCredentialsFromMap(credentials)
 	creds.RefreshToken = strings.TrimSpace(refreshToken)
 	if creds.RefreshToken == "" {
 		return nil, fmt.Errorf("missing refresh_token")
+	}
+	if strings.TrimSpace(creds.StartURL) != "" {
+		startURL, err := normalizeKiroStartURL(creds.StartURL)
+		if err != nil {
+			return nil, err
+		}
+		creds.StartURL = startURL
 	}
 	proxyURL := s.resolveProxyURL(ctx, proxyID)
 	return s.RefreshToken(ctx, creds, proxyURL)
@@ -379,6 +571,20 @@ func (s *KiroOAuthService) getDeviceSession(sessionID string) *KiroDeviceSession
 	return session
 }
 
+func (s *KiroOAuthService) getKiroIDESession(sessionID string) *KiroIDEAuthSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.ideSessions[sessionID]
+	if session == nil {
+		return nil
+	}
+	if time.Now().After(session.ExpiresAt) {
+		delete(s.ideSessions, sessionID)
+		return nil
+	}
+	return session
+}
+
 func (s *KiroOAuthService) resolveProxyURL(ctx context.Context, proxyID *int64) string {
 	if s == nil || s.proxyRepo == nil || proxyID == nil {
 		return ""
@@ -500,4 +706,114 @@ func randomKiroHex(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func randomKiroURLToken(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func kiroCodeChallenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func normalizeKiroStartURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = kiroStartURL
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid Kiro start_url; expected an https URL")
+	}
+	parsed.Fragment = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func normalizeKiroRedirectURI(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = kiroIDEDefaultRedirectURI
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid Kiro redirect_uri")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("invalid Kiro redirect_uri scheme")
+	}
+	parsed.Fragment = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func buildKiroIDESignInURL(state, codeChallenge, redirectURI, redirectFrom, startURL string) (string, error) {
+	parsed, err := url.Parse(kiroIDESignInURL)
+	if err != nil {
+		return "", err
+	}
+	q := parsed.Query()
+	q.Set("state", state)
+	q.Set("code_challenge", codeChallenge)
+	q.Set("code_challenge_method", "S256")
+	q.Set("redirect_uri", redirectURI)
+	q.Set("redirect_from", firstNonEmpty(redirectFrom, kiroIDEDefaultRedirectFrom))
+	if normalizedStartURL, err := normalizeKiroStartURL(startURL); err == nil && normalizedStartURL != kiroStartURL {
+		q.Set("start_url", normalizedStartURL)
+	}
+	parsed.RawQuery = q.Encode()
+	return parsed.String(), nil
+}
+
+func parseKiroIDECallback(code, state, callbackURL string) (string, string, error) {
+	code = strings.TrimSpace(code)
+	state = strings.TrimSpace(state)
+	callbackURL = strings.TrimSpace(callbackURL)
+	if callbackURL == "" && strings.Contains(code, "://") {
+		callbackURL = code
+		code = ""
+	}
+	if callbackURL != "" {
+		if parsed, err := url.Parse(callbackURL); err == nil {
+			if v := strings.TrimSpace(parsed.Query().Get("code")); v != "" {
+				code = v
+			}
+			if v := strings.TrimSpace(parsed.Query().Get("state")); v != "" {
+				state = v
+			}
+			if parsed.RawQuery == "" && parsed.Fragment != "" {
+				if values, err := url.ParseQuery(strings.TrimPrefix(parsed.Fragment, "?")); err == nil {
+					if v := strings.TrimSpace(values.Get("code")); v != "" {
+						code = v
+					}
+					if v := strings.TrimSpace(values.Get("state")); v != "" {
+						state = v
+					}
+				}
+			}
+		}
+		if code == "" || state == "" {
+			if idx := strings.Index(callbackURL, "?"); idx >= 0 {
+				query := callbackURL[idx+1:]
+				if hashIdx := strings.Index(query, "#"); hashIdx >= 0 {
+					query = query[:hashIdx]
+				}
+				if values, err := url.ParseQuery(query); err == nil {
+					if v := strings.TrimSpace(values.Get("code")); v != "" {
+						code = v
+					}
+					if v := strings.TrimSpace(values.Get("state")); v != "" {
+						state = v
+					}
+				}
+			}
+		}
+	}
+	if code == "" {
+		return "", "", fmt.Errorf("KiroIDE callback missing authorization code")
+	}
+	return code, state, nil
 }

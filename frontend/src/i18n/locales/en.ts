@@ -3868,7 +3868,29 @@ export default {
                     slowDown: 'Authorization is still pending. Please wait a bit before polling again.',
                     authorizationPending: 'Authorization is pending. Approve the request in your browser, then try again.',
                     failedToPoll: 'Failed to poll Kiro authorization status',
-                    failedToValidateRT: 'Failed to validate Kiro Refresh Token'
+                    failedToValidateRT: 'Failed to validate Kiro Refresh Token',
+                    builderDesc: 'Default AWS Builder ID start URL',
+                    iamDesc: 'Enterprise IAM Identity Center start URL',
+                    loginModeLabel: 'Login Method',
+                    deviceLogin: 'AWS Builder / IAM Device Login',
+                    kiroIDELogin: 'KiroIDE PKCE Login',
+                    startUrlLabel: 'Start URL',
+                    startUrlPlaceholder: 'https://view.awsapps.com/start or your enterprise start URL',
+                    startUrlHint: 'Required for enterprise IAM Identity Center accounts and RT imports.',
+                    startUrlRequired: 'Please enter the enterprise Start URL for IAM Login.',
+                    redirectUriLabel: 'Redirect URI',
+                    missingCallbackUrl: 'Paste the redirected localhost callback URL.',
+                    failedToStartKiroIDE: 'Failed to start KiroIDE login',
+                    failedToExchangeKiroIDE: 'Failed to exchange KiroIDE authorization code',
+                    kiroIDEStep1GenerateUrl: 'Generate KiroIDE sign-in URL',
+                    kiroIDEGenerateAuthUrl: 'Generate KiroIDE URL',
+                    kiroIDEStep2OpenUrl: 'Open the KiroIDE sign-in URL',
+                    kiroIDEOpenUrlDesc: 'After login, the browser redirects to localhost. Copy the full redirected URL from the address bar.',
+                    kiroIDEStep3EnterCode: 'Paste callback URL',
+                    kiroIDEAuthCodeDesc: 'Paste the full localhost callback URL, for example http://localhost:3128?code=...&state=...',
+                    kiroIDEAuthCode: 'Callback URL',
+                    kiroIDEAuthCodePlaceholder: 'http://localhost:3128?code=...&state=...',
+                    kiroIDEAuthCodeHint: 'The state is verified against the generated PKCE session.'
                   }
                 },      // Gemini specific (platform-wide)
       gemini: {

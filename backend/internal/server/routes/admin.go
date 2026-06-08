@@ -375,6 +375,9 @@ func registerKiroOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		kiro.POST("/oauth/device/start", h.Admin.KiroOAuth.StartDeviceFlow)
 		kiro.POST("/oauth/device/poll", h.Admin.KiroOAuth.PollDeviceFlow)
 		kiro.POST("/oauth/device/cancel", h.Admin.KiroOAuth.CancelDeviceFlow)
+		kiro.POST("/oauth/kiroide/start", h.Admin.KiroOAuth.StartKiroIDEAuth)
+		kiro.POST("/oauth/kiroide/exchange", h.Admin.KiroOAuth.ExchangeKiroIDEAuth)
+		kiro.POST("/oauth/kiroide/cancel", h.Admin.KiroOAuth.CancelKiroIDEAuth)
 		kiro.POST("/oauth/refresh-token", h.Admin.KiroOAuth.RefreshToken)
 	}
 }
