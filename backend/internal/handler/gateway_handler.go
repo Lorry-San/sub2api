@@ -1749,8 +1749,9 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 		platform = apiKey.Group.Platform
 	}
 	if platform == service.PlatformKiro {
-		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Token counting is not supported for this platform")
+		c.JSON(http.StatusOK, gin.H{
+			"input_tokens": service.EstimateKiroCountTokensFromBody(parsedReq.Body.Bytes()),
+		})
 		return
 	}
 

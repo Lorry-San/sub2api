@@ -3,6 +3,8 @@
 package service
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestAccountTestService_KiroUsesNativeUpstream(t *testing.T) {
@@ -105,6 +108,50 @@ func TestAccountTestService_KiroPreservesNewerOpusModels(t *testing.T) {
 	currentMessage := conversationState["currentMessage"].(map[string]any)
 	userInput := currentMessage["userInputMessage"].(map[string]any)
 	require.Equal(t, DefaultKiroModelOpus48, userInput["modelId"])
+}
+
+func TestKiroGatewayService_EstimatesUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":"hello world from kiro usage estimation"}],"tools":[{"name":"read_file","description":"read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}],"max_tokens":256}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"assistantResponseEvent":{"content":"estimated output tokens from kiro"}}`)),
+		},
+	}
+	svc := NewKiroGatewayService(&mockAccountRepoForGemini{}, upstream, nil)
+	account := &Account{
+		ID:          94,
+		Name:        "kiro-usage",
+		Platform:    PlatformKiro,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "kiro-token",
+			"expires_at":   strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+		},
+	}
+	parsed := &ParsedRequest{Body: NewRequestBodyRef(body), Model: DefaultKiroModelOpus48}
+
+	result, err := svc.ForwardAnthropic(context.Background(), c, account, parsed)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Greater(t, result.Usage.InputTokens, 0)
+	require.Greater(t, result.Usage.OutputTokens, 0)
+	require.Equal(t, result.Usage.InputTokens, int(gjson.Get(rec.Body.String(), "usage.input_tokens").Int()))
+	require.Equal(t, result.Usage.OutputTokens, int(gjson.Get(rec.Body.String(), "usage.output_tokens").Int()))
+}
+
+func TestEstimateKiroCountTokensFromBody(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-4","system":"你是一个代码助手","messages":[{"role":"user","content":"please explain this function"}]}`)
+
+	require.Greater(t, EstimateKiroCountTokensFromBody(body), 0)
+	require.Greater(t, EstimateKiroCountTokensFromBody([]byte(`not-json-but-still-countable`)), 0)
 }
 
 func TestAccountTestService_KiroAccountConnectionDoesNotFallbackToClaude(t *testing.T) {

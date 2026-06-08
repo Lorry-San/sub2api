@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -53,6 +55,11 @@ type kiroParsedResponse struct {
 	Content    []string
 	ToolUses   []map[string]any
 	StopReason string
+}
+
+type kiroEstimatedUsage struct {
+	InputTokens  int
+	OutputTokens int
 }
 
 func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Context, account *Account, parsed *ParsedRequest) (*ForwardResult, error) {
@@ -124,10 +131,11 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 	}
 
 	parsedResp := parseKiroEventStream(raw)
+	usage := estimateKiroUsage(reqPayload, parsedResp)
 	if reqPayload.Stream {
-		writeKiroAnthropicStream(c, requestedModel, parsedResp)
+		writeKiroAnthropicStream(c, requestedModel, parsedResp, usage)
 	} else {
-		c.JSON(http.StatusOK, kiroAnthropicResponse(requestedModel, parsedResp))
+		c.JSON(http.StatusOK, kiroAnthropicResponse(requestedModel, parsedResp, usage))
 	}
 
 	return &ForwardResult{
@@ -136,8 +144,8 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 		Stream:        reqPayload.Stream,
 		Duration:      time.Since(start),
 		Usage: ClaudeUsage{
-			InputTokens:  0,
-			OutputTokens: 0,
+			InputTokens:  usage.InputTokens,
+			OutputTokens: usage.OutputTokens,
 		},
 	}, nil
 }
@@ -617,7 +625,7 @@ func scanKiroJSONObjects(raw string, result *kiroParsedResponse, toolBuffers map
 	}
 }
 
-func kiroAnthropicResponse(model string, parsed kiroParsedResponse) gin.H {
+func kiroAnthropicResponse(model string, parsed kiroParsedResponse, usage kiroEstimatedUsage) gin.H {
 	content := make([]gin.H, 0, 1+len(parsed.ToolUses))
 	text := strings.Join(parsed.Content, "")
 	if text != "" {
@@ -644,13 +652,13 @@ func kiroAnthropicResponse(model string, parsed kiroParsedResponse) gin.H {
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
 		"usage": gin.H{
-			"input_tokens":  0,
-			"output_tokens": 0,
+			"input_tokens":  usage.InputTokens,
+			"output_tokens": usage.OutputTokens,
 		},
 	}
 }
 
-func writeKiroAnthropicStream(c *gin.Context, model string, parsed kiroParsedResponse) {
+func writeKiroAnthropicStream(c *gin.Context, model string, parsed kiroParsedResponse, usage kiroEstimatedUsage) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -668,7 +676,7 @@ func writeKiroAnthropicStream(c *gin.Context, model string, parsed kiroParsedRes
 			"content":       []any{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         gin.H{"input_tokens": 0, "output_tokens": 0},
+			"usage":         gin.H{"input_tokens": usage.InputTokens, "output_tokens": 0},
 		},
 	})
 	idx := 0
@@ -711,7 +719,7 @@ func writeKiroAnthropicStream(c *gin.Context, model string, parsed kiroParsedRes
 	writeSSE(c.Writer, "message_delta", gin.H{
 		"type":  "message_delta",
 		"delta": gin.H{"stop_reason": firstNonEmpty(parsed.StopReason, "end_turn"), "stop_sequence": nil},
-		"usage": gin.H{"output_tokens": 0},
+		"usage": gin.H{"output_tokens": usage.OutputTokens},
 	})
 	writeSSE(c.Writer, "message_stop", gin.H{"type": "message_stop"})
 	if flusher, ok := c.Writer.(http.Flusher); ok {
@@ -734,6 +742,118 @@ func (s *KiroGatewayService) writeKiroJSONError(c *gin.Context, status int, typ,
 			"message": message,
 		},
 	})
+}
+
+func EstimateKiroCountTokensFromBody(body []byte) int {
+	var req kiroAnthropicRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return estimateKiroTokensForText(string(body))
+	}
+	return estimateKiroRequestTokens(req)
+}
+
+func estimateKiroUsage(req kiroAnthropicRequest, parsed kiroParsedResponse) kiroEstimatedUsage {
+	return kiroEstimatedUsage{
+		InputTokens:  estimateKiroRequestTokens(req),
+		OutputTokens: estimateKiroResponseTokens(parsed),
+	}
+}
+
+func estimateKiroRequestTokens(req kiroAnthropicRequest) int {
+	total := 8
+	total += estimateKiroValueTokens(req.System)
+	total += estimateKiroValueTokens(req.Thinking)
+	for _, msg := range req.Messages {
+		total += 4 + estimateKiroTokensForText(msg.Role) + estimateKiroValueTokens(msg.Content)
+	}
+	for _, tool := range req.Tools {
+		total += 12 + estimateKiroValueTokens(tool)
+	}
+	if req.MaxTokens > 0 {
+		total++
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
+}
+
+func estimateKiroResponseTokens(parsed kiroParsedResponse) int {
+	total := estimateKiroTokensForText(strings.Join(parsed.Content, ""))
+	for _, toolUse := range parsed.ToolUses {
+		total += 8 + estimateKiroValueTokens(toolUse["name"]) + estimateKiroValueTokens(toolUse["input"])
+	}
+	if total < 0 {
+		return 0
+	}
+	return total
+}
+
+func estimateKiroValueTokens(value any) int {
+	switch v := value.(type) {
+	case nil:
+		return 0
+	case string:
+		return estimateKiroTokensForText(v)
+	case []any:
+		total := 0
+		for _, item := range v {
+			total += estimateKiroValueTokens(item)
+		}
+		return total
+	case []map[string]any:
+		total := 0
+		for _, item := range v {
+			total += estimateKiroValueTokens(item)
+		}
+		return total
+	case map[string]any:
+		total := 0
+		for key, item := range v {
+			total += estimateKiroTokensForText(key)
+			total += estimateKiroValueTokens(item)
+		}
+		return total
+	default:
+		if raw, err := json.Marshal(value); err == nil {
+			return estimateKiroTokensForText(string(raw))
+		}
+		return estimateKiroTokensForText(fmt.Sprint(value))
+	}
+}
+
+func estimateKiroTokensForText(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+	cjk := 0
+	asciiLettersDigits := 0
+	other := 0
+	for _, r := range text {
+		switch {
+		case isKiroCJKRune(r):
+			cjk++
+		case r <= unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)):
+			asciiLettersDigits++
+		case unicode.IsSpace(r):
+			continue
+		default:
+			other++
+		}
+	}
+	tokens := cjk + int(math.Ceil(float64(asciiLettersDigits)/4.0)) + int(math.Ceil(float64(other)/2.0))
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
+}
+
+func isKiroCJKRune(r rune) bool {
+	return (r >= 0x3400 && r <= 0x4dbf) ||
+		(r >= 0x4e00 && r <= 0x9fff) ||
+		(r >= 0xf900 && r <= 0xfaff) ||
+		(r >= 0x20000 && r <= 0x2ebef)
 }
 
 func textOrDefault(text, fallback string) string {
