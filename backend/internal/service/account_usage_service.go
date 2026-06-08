@@ -869,6 +869,14 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 		return nil, fmt.Errorf("missing Kiro access token")
 	}
 
+	now := time.Now()
+	usage := &UsageInfo{
+		Source:    "active",
+		UpdatedAt: &now,
+		ErrorCode: "",
+	}
+	defer s.addKiroLocalWindowStats(ctx, account, usage, now)
+
 	endpoint := "https://q.us-east-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
 	if creds.AuthMethod == KiroAuthMethodSocial && strings.TrimSpace(creds.ProfileARN) != "" {
 		endpoint += "&profileArn=" + url.QueryEscape(strings.TrimSpace(creds.ProfileARN))
@@ -890,25 +898,30 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 		ResponseHeaderTimeout: 10 * time.Second,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("build Kiro usage client: %w", err)
+		usage.Error = fmt.Sprintf("build Kiro usage client: %v", err)
+		return usage, nil
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request Kiro usage failed: %w", err)
+		usage.Error = fmt.Sprintf("request Kiro usage failed: %v", err)
+		return usage, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read Kiro usage response: %w", err)
+		usage.Error = fmt.Sprintf("read Kiro usage response: %v", err)
+		return usage, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Kiro usage request failed: status=%d body=%s", resp.StatusCode, truncateString(string(raw), 300))
+		usage.Error = fmt.Sprintf("Kiro usage request failed: status=%d body=%s", resp.StatusCode, truncateString(string(raw), 300))
+		return usage, nil
 	}
 
 	var parsed kiroUsageResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("parse Kiro usage response: %w", err)
+		usage.Error = fmt.Sprintf("parse Kiro usage response: %v", err)
+		return usage, nil
 	}
 
 	totalLimit := 0.0
@@ -932,13 +945,6 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 			bonusLimit += bonus.UsageLimit
 			bonusUsage += bonus.CurrentUsage
 		}
-	}
-
-	now := time.Now()
-	usage := &UsageInfo{
-		Source:    "active",
-		UpdatedAt: &now,
-		ErrorCode: "",
 	}
 
 	extraCredits := []AICredit{}
@@ -1181,6 +1187,32 @@ func (s *AccountUsageService) GetTodayStatsBatch(ctx context.Context, accountIDs
 		}
 	}
 	return result, nil
+}
+
+func (s *AccountUsageService) addKiroLocalWindowStats(ctx context.Context, account *Account, usage *UsageInfo, now time.Time) {
+	if s == nil || s.usageLogRepo == nil || account == nil || usage == nil {
+		return
+	}
+
+	fiveHourResetAt := now.Add(5 * time.Hour)
+	usage.FiveHour = &UsageProgress{
+		Utilization:      0,
+		ResetsAt:         &fiveHourResetAt,
+		RemainingSeconds: int(time.Until(fiveHourResetAt).Seconds()),
+	}
+	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, now.Add(-5*time.Hour)); err == nil {
+		usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
+	}
+
+	sevenDayResetAt := now.Add(7 * 24 * time.Hour)
+	usage.SevenDay = &UsageProgress{
+		Utilization:      0,
+		ResetsAt:         &sevenDayResetAt,
+		RemainingSeconds: int(time.Until(sevenDayResetAt).Seconds()),
+	}
+	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, now.Add(-7*24*time.Hour)); err == nil {
+		usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
+	}
 }
 
 func windowStatsFromAccountStats(stats *usagestats.AccountStats) *WindowStats {

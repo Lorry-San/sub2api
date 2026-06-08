@@ -317,7 +317,10 @@
       <div v-else-if="error" class="text-xs text-red-500">
         {{ error }}
       </div>
-      <div v-else-if="kiroUsageSummary.length > 0" class="space-y-1">
+      <div v-else-if="kiroUsageSummary.length > 0 || kiroLocalUsageAvailable || usageInfo?.error" class="space-y-1">
+        <div v-if="usageInfo?.error" class="max-w-[200px] truncate text-xs text-amber-600 dark:text-amber-400" :title="usageInfo.error">
+          {{ usageInfo.error }}
+        </div>
         <div
           v-if="usageInfo?.subscription_tier_raw"
           class="text-[10px] font-medium text-gray-600 dark:text-gray-300"
@@ -330,6 +333,26 @@
           class="text-[10px] text-gray-500 dark:text-gray-400"
         >
           {{ item.label }}: {{ item.value }}
+        </div>
+        <div v-if="kiroLocalUsageAvailable" class="space-y-1">
+          <UsageProgressBar
+            v-if="usageInfo?.five_hour"
+            label="5h"
+            :utilization="usageInfo.five_hour.utilization"
+            :resets-at="usageInfo.five_hour.resets_at"
+            :window-stats="usageInfo.five_hour.window_stats"
+            :show-now-when-idle="true"
+            color="indigo"
+          />
+          <UsageProgressBar
+            v-if="usageInfo?.seven_day"
+            label="7d"
+            :utilization="usageInfo.seven_day.utilization"
+            :resets-at="usageInfo.seven_day.resets_at"
+            :window-stats="usageInfo.seven_day.window_stats"
+            :show-now-when-idle="true"
+            color="emerald"
+          />
         </div>
       </div>
       <div v-else class="text-xs text-gray-400">-</div>
@@ -590,6 +613,9 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'openai') {
     return props.account.type === 'oauth'
   }
+  if (props.account.platform === 'kiro') {
+    return props.account.type === 'oauth'
+  }
   return false
 })
 
@@ -611,6 +637,22 @@ const geminiUsageAvailable = computed(() => {
 const hasOpenAIUsageFallback = computed(() => {
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return false
   return !!usageInfo.value?.five_hour || !!usageInfo.value?.seven_day
+})
+
+const kiroLocalUsageAvailable = computed(() => {
+  if (props.account.platform !== 'kiro' || props.account.type !== 'oauth') return false
+  const fiveHourStats = usageInfo.value?.five_hour?.window_stats
+  const sevenDayStats = usageInfo.value?.seven_day?.window_stats
+  return Boolean(
+    fiveHourStats?.requests ||
+    fiveHourStats?.tokens ||
+    fiveHourStats?.cost ||
+    fiveHourStats?.user_cost ||
+    sevenDayStats?.requests ||
+    sevenDayStats?.tokens ||
+    sevenDayStats?.cost ||
+    sevenDayStats?.user_cost
+  )
 })
 
 const openAIUsageRefreshKey = computed(() => buildOpenAIUsageRefreshKey(props.account))
