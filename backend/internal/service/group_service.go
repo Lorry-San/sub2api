@@ -47,6 +47,7 @@ type GroupSortOrderUpdate struct {
 type CreateGroupRequest struct {
 	Name                 string   `json:"name"`
 	Description          string   `json:"description"`
+	Platform             string   `json:"platform"`
 	RateMultiplier       float64  `json:"rate_multiplier"`
 	IsExclusive          bool     `json:"is_exclusive"`
 	AllowImageGeneration bool     `json:"allow_image_generation"`
@@ -58,6 +59,7 @@ type CreateGroupRequest struct {
 type UpdateGroupRequest struct {
 	Name                 *string  `json:"name"`
 	Description          *string  `json:"description"`
+	Platform             *string  `json:"platform"`
 	RateMultiplier       *float64 `json:"rate_multiplier"`
 	IsExclusive          *bool    `json:"is_exclusive"`
 	Status               *string  `json:"status"`
@@ -82,6 +84,11 @@ func NewGroupService(groupRepo GroupRepository, authCacheInvalidator APIKeyAuthC
 
 // Create 创建分组
 func (s *GroupService) Create(ctx context.Context, req CreateGroupRequest) (*Group, error) {
+	platform, err := normalizeGroupPlatform(req.Platform)
+	if err != nil {
+		return nil, err
+	}
+
 	imageRateMultiplier := 1.0
 	if req.ImageRateMultiplier != nil {
 		if *req.ImageRateMultiplier < 0 {
@@ -102,7 +109,7 @@ func (s *GroupService) Create(ctx context.Context, req CreateGroupRequest) (*Gro
 	group := &Group{
 		Name:                 req.Name,
 		Description:          req.Description,
-		Platform:             PlatformAnthropic,
+		Platform:             platform,
 		RateMultiplier:       req.RateMultiplier,
 		IsExclusive:          req.IsExclusive,
 		Status:               StatusActive,
@@ -168,6 +175,14 @@ func (s *GroupService) Update(ctx context.Context, id int64, req UpdateGroupRequ
 
 	if req.Description != nil {
 		group.Description = *req.Description
+	}
+
+	if req.Platform != nil {
+		platform, err := normalizeGroupPlatform(*req.Platform)
+		if err != nil {
+			return nil, err
+		}
+		group.Platform = platform
 	}
 
 	if req.RateMultiplier != nil {
@@ -245,4 +260,17 @@ func (s *GroupService) GetStats(ctx context.Context, id int64) (map[string]any, 
 	}
 
 	return stats, nil
+}
+
+func normalizeGroupPlatform(platform string) (string, error) {
+	if platform == "" {
+		return PlatformAnthropic, nil
+	}
+
+	switch platform {
+	case PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity, PlatformKiro:
+		return platform, nil
+	default:
+		return "", fmt.Errorf("invalid platform: %s", platform)
+	}
 }
