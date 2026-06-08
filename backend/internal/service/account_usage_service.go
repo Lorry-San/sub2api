@@ -884,7 +884,14 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	client := httppool.GetPool().GetHTTPClient(proxyURL, account.ID)
+	client, err := httppool.GetClient(httppool.Options{
+		ProxyURL:              proxyURL,
+		Timeout:               10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build Kiro usage client: %w", err)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request Kiro usage failed: %w", err)
