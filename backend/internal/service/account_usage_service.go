@@ -10,10 +10,10 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
-	"net/url"
 
 	httppool "github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	openaipkg "github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -265,6 +265,7 @@ type AccountUsageService struct {
 	usageFetcher            ClaudeUsageFetcher
 	geminiQuotaService      *GeminiQuotaService
 	antigravityQuotaFetcher *AntigravityQuotaFetcher
+	kiroOAuthService        *KiroOAuthService
 	cache                   *UsageCache
 	identityCache           IdentityCache
 	tlsFPProfileService     *TLSFingerprintProfileService
@@ -277,6 +278,7 @@ func NewAccountUsageService(
 	usageFetcher ClaudeUsageFetcher,
 	geminiQuotaService *GeminiQuotaService,
 	antigravityQuotaFetcher *AntigravityQuotaFetcher,
+	kiroOAuthService *KiroOAuthService,
 	cache *UsageCache,
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
@@ -287,6 +289,7 @@ func NewAccountUsageService(
 		usageFetcher:            usageFetcher,
 		geminiQuotaService:      geminiQuotaService,
 		antigravityQuotaFetcher: antigravityQuotaFetcher,
+		kiroOAuthService:        kiroOAuthService,
 		cache:                   cache,
 		identityCache:           identityCache,
 		tlsFPProfileService:     tlsFPProfileService,
@@ -865,11 +868,18 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 		return nil, fmt.Errorf("missing Kiro credentials")
 	}
 	accessToken := strings.TrimSpace(creds.AccessToken)
+	now := time.Now()
+	if (creds.IsExpired(now) || accessToken == "") && s.kiroOAuthService != nil {
+		refreshedToken, refreshedCreds, refreshErr := forceRefreshKiroAccessToken(ctx, s.kiroOAuthService, s.accountRepo, account)
+		if refreshErr == nil && strings.TrimSpace(refreshedToken) != "" {
+			accessToken = strings.TrimSpace(refreshedToken)
+			creds = NewKiroCredentialsFromMap(refreshedCreds)
+		}
+	}
 	if accessToken == "" {
 		return nil, fmt.Errorf("missing Kiro access token")
 	}
 
-	now := time.Now()
 	usage := &UsageInfo{
 		Source:    "active",
 		UpdatedAt: &now,
@@ -882,11 +892,14 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 		endpoint += "&profileArn=" + url.QueryEscape(strings.TrimSpace(creds.ProfileARN))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build Kiro usage request: %w", err)
+	buildReq := func(token string, currentCreds *KiroCredentials) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		setKiroHeaders(req.Header, token, currentCreds)
+		return req, nil
 	}
-	setKiroHeaders(req.Header, accessToken, creds)
 
 	var proxyURL string
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -901,17 +914,42 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 		usage.Error = fmt.Sprintf("build Kiro usage client: %v", err)
 		return usage, nil
 	}
+	req, err := buildReq(accessToken, creds)
+	if err != nil {
+		return nil, fmt.Errorf("build Kiro usage request: %w", err)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		usage.Error = fmt.Sprintf("request Kiro usage failed: %v", err)
 		return usage, nil
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	_ = resp.Body.Close()
 	if err != nil {
 		usage.Error = fmt.Sprintf("read Kiro usage response: %v", err)
 		return usage, nil
+	}
+	if resp.StatusCode == http.StatusUnauthorized && s.kiroOAuthService != nil {
+		refreshedToken, refreshedCreds, refreshErr := forceRefreshKiroAccessToken(ctx, s.kiroOAuthService, s.accountRepo, account)
+		if refreshErr == nil && strings.TrimSpace(refreshedToken) != "" {
+			creds = NewKiroCredentialsFromMap(refreshedCreds)
+			retryReq, reqErr := buildReq(refreshedToken, creds)
+			if reqErr != nil {
+				return nil, fmt.Errorf("build Kiro usage retry request: %w", reqErr)
+			}
+			resp, err = client.Do(retryReq)
+			if err != nil {
+				usage.Error = fmt.Sprintf("retry Kiro usage failed: %v", err)
+				return usage, nil
+			}
+			raw, err = io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			_ = resp.Body.Close()
+			if err != nil {
+				usage.Error = fmt.Sprintf("read Kiro usage retry response: %v", err)
+				return usage, nil
+			}
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		usage.Error = fmt.Sprintf("Kiro usage request failed: status=%d body=%s", resp.StatusCode, truncateString(string(raw), 300))

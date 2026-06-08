@@ -97,11 +97,19 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 		return nil, err
 	}
 
-	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURL, bytes.NewReader(wireBody))
+	buildUpstreamReq := func(token string, currentCreds *KiroCredentials) (*http.Request, error) {
+		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURL, bytes.NewReader(wireBody))
+		if err != nil {
+			return nil, err
+		}
+		setKiroHeaders(upstreamReq.Header, token, currentCreds)
+		return upstreamReq, nil
+	}
+
+	upstreamReq, err := buildUpstreamReq(accessToken, creds)
 	if err != nil {
 		return nil, err
 	}
-	setKiroHeaders(upstreamReq.Header, accessToken, creds)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -112,11 +120,31 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 		s.writeKiroJSONError(c, http.StatusBadGateway, "upstream_error", "Kiro upstream request failed")
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	_ = resp.Body.Close()
 	if err != nil {
 		return nil, fmt.Errorf("read Kiro upstream response: %w", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		refreshedToken, refreshedCreds, refreshErr := s.forceRefreshAccessToken(ctx, account)
+		if refreshErr == nil && strings.TrimSpace(refreshedToken) != "" {
+			creds = NewKiroCredentialsFromMap(refreshedCreds)
+			retryReq, reqErr := buildUpstreamReq(refreshedToken, creds)
+			if reqErr != nil {
+				return nil, reqErr
+			}
+			resp, err = s.httpUpstream.Do(retryReq, proxyURL, account.ID, account.Concurrency)
+			if err != nil {
+				s.writeKiroJSONError(c, http.StatusBadGateway, "upstream_error", "Kiro upstream request failed")
+				return nil, err
+			}
+			raw, err = io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+			_ = resp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("read Kiro upstream retry response: %w", err)
+			}
+		}
 	}
 	if resp.StatusCode >= 400 {
 		if shouldKiroFailover(resp.StatusCode) {
@@ -180,6 +208,37 @@ func (s *KiroGatewayService) resolveAccessToken(ctx context.Context, account *Ac
 		newCredentials = merged
 	}
 	return tokenInfo.AccessToken, newCredentials, nil
+}
+
+func (s *KiroGatewayService) forceRefreshAccessToken(ctx context.Context, account *Account) (string, map[string]any, error) {
+	if s == nil {
+		return "", nil, fmt.Errorf("Kiro gateway service is not configured")
+	}
+	return forceRefreshKiroAccessToken(ctx, s.kiroOAuthService, s.accountRepo, account)
+}
+
+func forceRefreshKiroAccessToken(ctx context.Context, oauthService *KiroOAuthService, accountRepo AccountRepository, account *Account) (string, map[string]any, error) {
+	if oauthService == nil {
+		return "", nil, fmt.Errorf("Kiro OAuth service is not configured")
+	}
+	tokenInfo, err := oauthService.RefreshAccountToken(ctx, account)
+	if err != nil {
+		return "", nil, err
+	}
+	if tokenInfo == nil || strings.TrimSpace(tokenInfo.AccessToken) == "" {
+		return "", nil, fmt.Errorf("Kiro refresh response missing access token")
+	}
+	newCredentials := oauthService.BuildAccountCredentials(tokenInfo)
+	merged := MergeCredentials(account.Credentials, newCredentials)
+	merged["_token_version"] = time.Now().UnixMilli()
+	if accountRepo != nil {
+		if err := persistAccountCredentials(ctx, accountRepo, account, merged); err != nil {
+			return "", nil, fmt.Errorf("persist Kiro refreshed token: %w", err)
+		}
+	} else {
+		account.Credentials = merged
+	}
+	return tokenInfo.AccessToken, merged, nil
 }
 
 func buildKiroRequestFromAnthropic(req kiroAnthropicRequest, model string, creds *KiroCredentials) (map[string]any, error) {

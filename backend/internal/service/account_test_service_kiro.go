@@ -65,26 +65,52 @@ func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to encode Kiro request: %s", err.Error()))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURL, bytes.NewReader(payloadBytes))
-	if err != nil {
-		return s.sendErrorAndEnd(c, "Failed to create Kiro request")
+	buildReq := func(token string, currentCreds *KiroCredentials) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURL, bytes.NewReader(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+		setKiroHeaders(req.Header, token, currentCreds)
+		return req, nil
 	}
-	setKiroHeaders(req.Header, accessToken, creds)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
 
+	req, err := buildReq(accessToken, creds)
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Kiro request")
+	}
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Kiro request failed: %s", err.Error()))
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	_ = resp.Body.Close()
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read Kiro response: %s", err.Error()))
+	}
+	if resp.StatusCode == http.StatusUnauthorized && s.kiroGatewayService != nil {
+		refreshedToken, refreshedCreds, refreshErr := s.kiroGatewayService.forceRefreshAccessToken(ctx, account)
+		if refreshErr == nil && strings.TrimSpace(refreshedToken) != "" {
+			creds = NewKiroCredentialsFromMap(refreshedCreds)
+			retryReq, reqErr := buildReq(refreshedToken, creds)
+			if reqErr != nil {
+				return s.sendErrorAndEnd(c, "Failed to create Kiro retry request")
+			}
+			resp, err = s.httpUpstream.Do(retryReq, proxyURL, account.ID, account.Concurrency)
+			if err != nil {
+				return s.sendErrorAndEnd(c, fmt.Sprintf("Kiro retry request failed: %s", err.Error()))
+			}
+			raw, err = io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+			_ = resp.Body.Close()
+			if err != nil {
+				return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read Kiro retry response: %s", err.Error()))
+			}
+		}
 	}
 
 	if resp.StatusCode >= 400 {
