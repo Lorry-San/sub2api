@@ -887,13 +887,8 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 	}
 	defer s.addKiroLocalWindowStats(ctx, account, usage, now)
 
-	endpoint := "https://q.us-east-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
-	if creds.AuthMethod == KiroAuthMethodSocial && strings.TrimSpace(creds.ProfileARN) != "" {
-		endpoint += "&profileArn=" + url.QueryEscape(strings.TrimSpace(creds.ProfileARN))
-	}
-
 	buildReq := func(token string, currentCreds *KiroCredentials) (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, buildKiroUsageEndpoint(currentCreds), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -1013,6 +1008,18 @@ func (s *AccountUsageService) getKiroUsage(ctx context.Context, account *Account
 	}
 
 	return usage, nil
+}
+
+func buildKiroUsageEndpoint(creds *KiroCredentials) string {
+	region := ""
+	if creds != nil {
+		region = creds.Region
+	}
+	endpoint := kiroQServiceEndpoint(region) + "/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
+	if profileARN := creds.EffectiveProfileARN(); profileARN != "" {
+		endpoint += "&profileArn=" + url.QueryEscape(profileARN)
+	}
+	return endpoint
 }
 
 // recalcAntigravityRemainingSeconds 重新计算 Antigravity UsageInfo 中各窗口的 RemainingSeconds

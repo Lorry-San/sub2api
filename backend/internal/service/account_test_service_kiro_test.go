@@ -55,7 +55,8 @@ func TestAccountTestService_KiroUsesNativeUpstream(t *testing.T) {
 	require.Equal(t, kiroAssistantURL, upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer kiro-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Contains(t, upstream.lastReq.Header.Get("User-Agent"), "KiroIDE-")
-	require.Contains(t, upstream.lastReq.Header.Get("x-amz-user-agent"), "KiroIDE-")
+	require.Contains(t, upstream.lastReq.Header.Get("x-amz-user-agent"), "KiroIDE ")
+	require.Contains(t, upstream.lastReq.Header.Get("User-Agent"), "api/codewhispererstreaming#")
 	require.Contains(t, recorder.Body.String(), `"model":"claude-sonnet-4"`)
 	require.Contains(t, recorder.Body.String(), `"text":"ok"`)
 	require.Contains(t, recorder.Body.String(), `"success":true`)
@@ -66,6 +67,10 @@ func TestAccountTestService_KiroUsesNativeUpstream(t *testing.T) {
 	currentMessage := conversationState["currentMessage"].(map[string]any)
 	userInput := currentMessage["userInputMessage"].(map[string]any)
 	require.Equal(t, "claude-sonnet-4", userInput["modelId"])
+	require.Equal(t, kiroBuilderIDProfileARN, sent["profileArn"])
+	require.Equal(t, kiroBuilderIDProfileARN, conversationState["profileArn"])
+	require.Equal(t, "attempt=1; max=3", upstream.lastReq.Header.Get("amz-sdk-request"))
+	require.NotEmpty(t, upstream.lastReq.Header.Get("amz-sdk-invocation-id"))
 }
 
 func TestAccountTestService_KiroPreservesNewerOpusModels(t *testing.T) {
@@ -107,7 +112,7 @@ func TestAccountTestService_KiroPreservesNewerOpusModels(t *testing.T) {
 	conversationState := sent["conversationState"].(map[string]any)
 	currentMessage := conversationState["currentMessage"].(map[string]any)
 	userInput := currentMessage["userInputMessage"].(map[string]any)
-	require.Equal(t, DefaultKiroModelOpus48, userInput["modelId"])
+	require.Equal(t, "claude-opus-4.8", userInput["modelId"])
 }
 
 func TestKiroGatewayService_EstimatesUsage(t *testing.T) {
@@ -145,6 +150,162 @@ func TestKiroGatewayService_EstimatesUsage(t *testing.T) {
 	require.Greater(t, result.Usage.OutputTokens, 0)
 	require.Equal(t, result.Usage.InputTokens, int(gjson.Get(rec.Body.String(), "usage.input_tokens").Int()))
 	require.Equal(t, result.Usage.OutputTokens, int(gjson.Get(rec.Body.String(), "usage.output_tokens").Int()))
+}
+
+func TestKiroGatewayService_BuildsKiroProxyCompatiblePayload(t *testing.T) {
+	req := kiroAnthropicRequest{
+		Model:     DefaultKiroModelOpus48,
+		Messages:  []kiroAnthropicMessage{{Role: "user", Content: "hi"}},
+		MaxTokens: 2048,
+		Thinking:  map[string]any{"type": "enabled", "budget_tokens": 8000},
+		Metadata:  map[string]any{"session_id": "session-one"},
+	}
+	temperature := 0.7
+	topP := 0.9
+	req.Temperature = &temperature
+	req.TopP = &topP
+	creds := &KiroCredentials{
+		AuthMethod: KiroAuthMethodExternal,
+		Region:     "us-east-1",
+		StartURL:   "https://example.awsapps.com/start",
+	}
+
+	payload, err := buildKiroRequestFromAnthropic(req, DefaultKiroModelOpus48, creds)
+	require.NoError(t, err)
+	require.Equal(t, kiroEnterpriseFallbackProfileARN("us-east-1"), payload["profileArn"])
+	require.Equal(t, float64(2048), gjson.GetBytes(mustJSONBytes(t, payload), "inferenceConfig.maxTokens").Float())
+	require.Equal(t, 0.7, gjson.GetBytes(mustJSONBytes(t, payload), "inferenceConfig.temperature").Float())
+	require.Equal(t, 0.9, gjson.GetBytes(mustJSONBytes(t, payload), "inferenceConfig.topP").Float())
+	require.Equal(t, "adaptive", gjson.GetBytes(mustJSONBytes(t, payload), "additionalModelRequestFields.thinking.type").String())
+	require.Equal(t, "medium", gjson.GetBytes(mustJSONBytes(t, payload), "additionalModelRequestFields.output_config.effort").String())
+
+	payloadAgain, err := buildKiroRequestFromAnthropic(req, DefaultKiroModelOpus48, creds)
+	require.NoError(t, err)
+	firstID := gjson.GetBytes(mustJSONBytes(t, payload), "conversationState.conversationId").String()
+	secondID := gjson.GetBytes(mustJSONBytes(t, payloadAgain), "conversationState.conversationId").String()
+	require.NotEmpty(t, firstID)
+	require.Equal(t, firstID, secondID)
+}
+
+func TestKiroGatewayService_EnterpriseHeadersUseExternalIDPTokenType(t *testing.T) {
+	header := http.Header{}
+	setKiroHeaders(header, "token", &KiroCredentials{
+		AuthMethod: KiroAuthMethodExternal,
+		StartURL:   "https://example.awsapps.com/start",
+	})
+
+	require.Equal(t, "Bearer token", header.Get("Authorization"))
+	require.Equal(t, "EXTERNAL_IDP", header.Get("TokenType"))
+	require.Equal(t, "vibe", header.Get("x-amzn-kiro-agent-mode"))
+	require.Equal(t, "attempt=1; max=3", header.Get("amz-sdk-request"))
+}
+
+func TestKiroUsageEndpointUsesEffectiveProfileARN(t *testing.T) {
+	socialEndpoint := buildKiroUsageEndpoint(&KiroCredentials{AuthMethod: KiroAuthMethodSocial})
+	require.Contains(t, socialEndpoint, "profileArn=arn%3Aaws%3Acodewhisperer%3Aus-east-1%3A699475941385%3Aprofile%2FEHGA3GRVQMUK")
+
+	enterpriseEndpoint := buildKiroUsageEndpoint(&KiroCredentials{AuthMethod: KiroAuthMethodExternal, Region: "eu-west-1"})
+	require.Contains(t, enterpriseEndpoint, "https://q.eu-central-1.amazonaws.com/getUsageLimits")
+	require.Contains(t, enterpriseEndpoint, "profileArn=arn%3Aaws%3Acodewhisperer%3Aeu-central-1%3A610548660232%3Aprofile%2FVNECVYCYYAWN")
+}
+
+func TestKiroCredentials_ExternalIDPUsesIDCRefresh(t *testing.T) {
+	creds := NewKiroCredentialsFromMap(map[string]any{
+		"auth_method":   "external_idp",
+		"client_id":     "client",
+		"client_secret": "secret",
+		"start_url":     "https://example.awsapps.com/start",
+	})
+
+	require.True(t, creds.UsesIDCRefresh())
+	require.True(t, creds.RequiresExternalIDPTokenType())
+	require.Equal(t, KiroAuthMethodExternal, creds.AuthMethod)
+}
+
+func TestKiroGatewayService_UsesDotMinorVersionForUpstreamModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hi"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"assistantResponseEvent":{"content":"ok"}}`)),
+		},
+	}
+	svc := NewKiroGatewayService(&mockAccountRepoForGemini{}, upstream, nil)
+	account := &Account{
+		ID:          97,
+		Name:        "kiro-opus-47",
+		Platform:    PlatformKiro,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "kiro-token",
+			"expires_at":   strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+		},
+	}
+
+	result, err := svc.ForwardAnthropic(context.Background(), c, account, &ParsedRequest{Body: NewRequestBodyRef(body), Model: DefaultKiroModelOpus47})
+	require.NoError(t, err)
+	require.Equal(t, DefaultKiroModelOpus47, result.UpstreamModel)
+	require.Equal(t, DefaultKiroModelOpus47, gjson.Get(rec.Body.String(), "model").String())
+	require.Equal(t, "claude-opus-4.7", gjson.GetBytes(upstream.lastBody, "conversationState.currentMessage.userInputMessage.modelId").String())
+}
+
+func TestKiroGatewayService_FetchesEnterpriseProfileARNBeforeRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	realARN := "arn:aws:codewhisperer:us-east-1:111122223333:profile/REALPROFILE"
+	upstream := &httpUpstreamRecorder{
+		responses: []*http.Response{
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"profiles":[{"arn":"` + realARN + `"}]}`)),
+			},
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"assistantResponseEvent":{"content":"ok"}}`)),
+			},
+		},
+	}
+	account := &Account{
+		ID:          98,
+		Name:        "kiro-enterprise",
+		Platform:    PlatformKiro,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":  "enterprise-token",
+			"refresh_token": "enterprise-refresh",
+			"expires_at":    strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+			"auth_method":   KiroAuthMethodExternal,
+			"client_id":     "client",
+			"client_secret": "secret",
+			"start_url":     "https://example.awsapps.com/start",
+		},
+	}
+	repo := &mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}
+	svc := NewKiroGatewayService(repo, upstream, nil)
+
+	_, err := svc.ForwardAnthropic(context.Background(), c, account, &ParsedRequest{Body: NewRequestBodyRef(body), Model: DefaultKiroModelSonnet})
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 2)
+	require.Contains(t, upstream.requests[0].URL.String(), "/ListAvailableProfiles")
+	require.Equal(t, "EXTERNAL_IDP", upstream.requests[0].Header.Get("TokenType"))
+	require.Equal(t, kiroAssistantURL, upstream.requests[1].URL.String())
+	require.Equal(t, realARN, account.GetCredential("profile_arn"))
+	require.Equal(t, realARN, gjson.GetBytes(upstream.lastBody, "profileArn").String())
+	require.Equal(t, realARN, gjson.GetBytes(upstream.lastBody, "conversationState.profileArn").String())
 }
 
 func TestKiroGatewayService_UsesLatestCredentialsWhenSnapshotTokenDiffers(t *testing.T) {
@@ -267,4 +428,11 @@ func TestAccountTestService_KiroAccountConnectionDoesNotFallbackToClaude(t *test
 	require.Equal(t, kiroAssistantURL, upstream.lastReq.URL.String())
 	require.NotEqual(t, testClaudeAPIURL, upstream.lastReq.URL.String())
 	require.Contains(t, rec.Body.String(), `"model":"claude-sonnet-4"`)
+}
+
+func mustJSONBytes(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+	return raw
 }

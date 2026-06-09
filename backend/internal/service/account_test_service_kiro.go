@@ -51,22 +51,24 @@ func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *
 		account.Credentials = MergeCredentials(account.Credentials, updatedCreds)
 		creds = NewKiroCredentialsFromMap(account.Credentials)
 	}
+	creds = s.kiroGatewayService.ensureKiroProfileARN(ctx, account, creds, accessToken)
 
-	payload, err := buildKiroRequestFromAnthropic(kiroAnthropicRequest{
-		Model:     testModelID,
-		Messages:  []kiroAnthropicMessage{{Role: "user", Content: "hi"}},
-		MaxTokens: 256,
-	}, testModelID, creds)
-	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to build Kiro request: %s", err.Error()))
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to encode Kiro request: %s", err.Error()))
-	}
+	upstreamTestModelID := kiroUpstreamModelID(testModelID)
 
 	buildReq := func(token string, currentCreds *KiroCredentials) (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURL, bytes.NewReader(payloadBytes))
+		payload, err := buildKiroRequestFromAnthropic(kiroAnthropicRequest{
+			Model:     testModelID,
+			Messages:  []kiroAnthropicMessage{{Role: "user", Content: "hi"}},
+			MaxTokens: 256,
+		}, upstreamTestModelID, currentCreds)
+		if err != nil {
+			return nil, fmt.Errorf("build Kiro request: %w", err)
+		}
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("encode Kiro request: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURLForCredentials(currentCreds), bytes.NewReader(payloadBytes))
 		if err != nil {
 			return nil, err
 		}
@@ -97,6 +99,7 @@ func (s *AccountTestService) testKiroAccountConnection(c *gin.Context, account *
 		refreshedToken, refreshedCreds, refreshErr := s.kiroGatewayService.forceRefreshAccessToken(ctx, account)
 		if refreshErr == nil && strings.TrimSpace(refreshedToken) != "" {
 			creds = NewKiroCredentialsFromMap(refreshedCreds)
+			creds = s.kiroGatewayService.ensureKiroProfileARN(ctx, account, creds, refreshedToken)
 			retryReq, reqErr := buildReq(refreshedToken, creds)
 			if reqErr != nil {
 				return s.sendErrorAndEnd(c, "Failed to create Kiro retry request")

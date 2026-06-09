@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -18,8 +19,13 @@ import (
 )
 
 const (
-	kiroAssistantURL = "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
-	kiroModelsURL    = "https://q.us-east-1.amazonaws.com/ListAvailableModels"
+	kiroDefaultQEndpoint              = "https://q.us-east-1.amazonaws.com"
+	kiroEUQEndpoint                   = "https://q.eu-central-1.amazonaws.com"
+	kiroDefaultCodeWhispererEndpoint  = "https://codewhisperer.us-east-1.amazonaws.com"
+	kiroEUCodeWhispererEndpoint       = "https://codewhisperer.eu-central-1.amazonaws.com"
+	kiroAssistantURL                  = kiroDefaultQEndpoint + "/generateAssistantResponse"
+	kiroModelsURL                     = kiroDefaultQEndpoint + "/ListAvailableModels"
+	kiroListAvailableProfilesEndpoint = "/ListAvailableProfiles"
 )
 
 type KiroGatewayService struct {
@@ -43,13 +49,19 @@ func NewKiroGatewayService(accountRepo AccountRepository, httpUpstream HTTPUpstr
 }
 
 type kiroAnthropicRequest struct {
-	Model     string                 `json:"model"`
-	System    any                    `json:"system,omitempty"`
-	Messages  []kiroAnthropicMessage `json:"messages"`
-	Tools     []map[string]any       `json:"tools,omitempty"`
-	Thinking  map[string]any         `json:"thinking,omitempty"`
-	Stream    bool                   `json:"stream,omitempty"`
-	MaxTokens int                    `json:"max_tokens,omitempty"`
+	Model           string                 `json:"model"`
+	System          any                    `json:"system,omitempty"`
+	Messages        []kiroAnthropicMessage `json:"messages"`
+	Tools           []map[string]any       `json:"tools,omitempty"`
+	Thinking        map[string]any         `json:"thinking,omitempty"`
+	Stream          bool                   `json:"stream,omitempty"`
+	MaxTokens       int                    `json:"max_tokens,omitempty"`
+	Temperature     *float64               `json:"temperature,omitempty"`
+	TopP            *float64               `json:"top_p,omitempty"`
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
+	OutputConfig    map[string]any         `json:"output_config,omitempty"`
+	ConversationID  string                 `json:"conversation_id,omitempty"`
+	Metadata        map[string]any         `json:"metadata,omitempty"`
 }
 
 type kiroAnthropicMessage struct {
@@ -92,20 +104,22 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 		account.Credentials = MergeCredentials(account.Credentials, updatedCreds)
 		creds = NewKiroCredentialsFromMap(account.Credentials)
 	}
+	creds = s.ensureKiroProfileARN(ctx, account, creds, accessToken)
 
 	requestedModel := reqPayload.Model
 	mappedModel := defaultKiroMappedModel(account.GetMappedModel(requestedModel))
-	kiroBody, err := buildKiroRequestFromAnthropic(reqPayload, mappedModel, creds)
-	if err != nil {
-		return nil, err
-	}
-	wireBody, err := json.Marshal(kiroBody)
-	if err != nil {
-		return nil, err
-	}
+	upstreamModel := kiroUpstreamModelID(mappedModel)
 
 	buildUpstreamReq := func(token string, currentCreds *KiroCredentials) (*http.Request, error) {
-		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURL, bytes.NewReader(wireBody))
+		kiroBody, err := buildKiroRequestFromAnthropic(reqPayload, upstreamModel, currentCreds)
+		if err != nil {
+			return nil, err
+		}
+		wireBody, err := json.Marshal(kiroBody)
+		if err != nil {
+			return nil, err
+		}
+		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURLForCredentials(currentCreds), bytes.NewReader(wireBody))
 		if err != nil {
 			return nil, err
 		}
@@ -137,6 +151,7 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 		refreshedToken, refreshedCreds, refreshErr := s.forceRefreshAccessToken(ctx, account)
 		if refreshErr == nil && strings.TrimSpace(refreshedToken) != "" {
 			creds = NewKiroCredentialsFromMap(refreshedCreds)
+			creds = s.ensureKiroProfileARN(ctx, account, creds, refreshedToken)
 			retryReq, reqErr := buildUpstreamReq(refreshedToken, creds)
 			if reqErr != nil {
 				return nil, reqErr
@@ -243,6 +258,78 @@ func (s *KiroGatewayService) useLatestCredentialsIfStale(ctx context.Context, ac
 	return account
 }
 
+func (s *KiroGatewayService) ensureKiroProfileARN(ctx context.Context, account *Account, creds *KiroCredentials, accessToken string) *KiroCredentials {
+	if s == nil || s.httpUpstream == nil || account == nil || creds == nil || !creds.IsEnterpriseExternalIDP() {
+		return creds
+	}
+	if arn := strings.TrimSpace(creds.ProfileARN); arn != "" && !isKiroPlaceholderProfileARN(arn) {
+		return creds
+	}
+	arn, err := s.fetchKiroEnterpriseProfileARN(ctx, account, creds, accessToken)
+	if err != nil || strings.TrimSpace(arn) == "" || isKiroPlaceholderProfileARN(arn) {
+		return creds
+	}
+
+	updated := MergeCredentials(account.Credentials, map[string]any{"profile_arn": strings.TrimSpace(arn)})
+	updated["_token_version"] = time.Now().UnixMilli()
+	if s.accountRepo != nil {
+		if err := persistAccountCredentials(ctx, s.accountRepo, account, updated); err == nil {
+			s.syncSchedulerAccountCache(ctx, account)
+			return NewKiroCredentialsFromMap(account.Credentials)
+		}
+	}
+	account.Credentials = updated
+	return NewKiroCredentialsFromMap(updated)
+}
+
+func (s *KiroGatewayService) fetchKiroEnterpriseProfileARN(ctx context.Context, account *Account, creds *KiroCredentials, accessToken string) (string, error) {
+	if s == nil || s.httpUpstream == nil || account == nil || creds == nil || strings.TrimSpace(accessToken) == "" {
+		return "", nil
+	}
+	body := bytes.NewReader([]byte(`{}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroCodeWhispererEndpoint(creds.Region)+kiroListAvailableProfilesEndpoint, body)
+	if err != nil {
+		return "", err
+	}
+	setKiroHeaders(req.Header, accessToken, creds)
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	if err != nil {
+		return "", err
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return "", readErr
+	}
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("Kiro ListAvailableProfiles failed: status=%d body=%s", resp.StatusCode, truncateString(string(raw), 300))
+	}
+	var parsed struct {
+		Profiles []struct {
+			ARN string `json:"arn"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", err
+	}
+	for _, profile := range parsed.Profiles {
+		if arn := strings.TrimSpace(profile.ARN); arn != "" {
+			return arn, nil
+		}
+	}
+	return "", nil
+}
+
 func (s *KiroGatewayService) syncSchedulerAccountCache(ctx context.Context, account *Account) {
 	if s == nil || s.schedulerSnapshot == nil || account == nil {
 		return
@@ -311,18 +398,103 @@ func buildKiroRequestFromAnthropic(req kiroAnthropicRequest, model string, creds
 		"agentContinuationId": uuid.NewString(),
 		"agentTaskType":       "vibe",
 		"chatTriggerType":     "MANUAL",
-		"conversationId":      uuid.NewString(),
+		"conversationId":      resolveKiroConversationID(req, history),
 		"currentMessage":      map[string]any{"userInputMessage": userMsg},
 	}
 	if len(history) > 0 {
 		conversationState["history"] = normalizeKiroHistory(history, model)
 	}
 	payload := map[string]any{"conversationState": conversationState}
-	if creds != nil && strings.TrimSpace(creds.ProfileARN) != "" {
-		conversationState["profileArn"] = creds.ProfileARN
-		payload["profileArn"] = creds.ProfileARN
+	if profileARN := creds.EffectiveProfileARN(); profileARN != "" {
+		conversationState["profileArn"] = profileARN
+		payload["profileArn"] = profileARN
+	}
+	if inferenceConfig := buildKiroInferenceConfig(req); len(inferenceConfig) > 0 {
+		payload["inferenceConfig"] = inferenceConfig
+	}
+	if additionalFields := buildKiroAdditionalModelRequestFields(req); len(additionalFields) > 0 {
+		payload["additionalModelRequestFields"] = additionalFields
 	}
 	return payload, nil
+}
+
+func buildKiroInferenceConfig(req kiroAnthropicRequest) map[string]any {
+	cfg := map[string]any{}
+	if req.MaxTokens > 0 {
+		cfg["maxTokens"] = req.MaxTokens
+	}
+	if req.Temperature != nil {
+		cfg["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		cfg["topP"] = *req.TopP
+	}
+	return cfg
+}
+
+func resolveKiroConversationID(req kiroAnthropicRequest, history []map[string]any) string {
+	seed := strings.TrimSpace(req.ConversationID)
+	if seed == "" {
+		for _, key := range []string{"conversation_id", "conversationId", "session_id", "sessionId", "user_id"} {
+			if value := credentialValueToString(req.Metadata[key]); value != "" {
+				seed = value
+				break
+			}
+		}
+	}
+	if seed == "" {
+		fingerprint := map[string]any{
+			"model":    req.Model,
+			"system":   req.System,
+			"messages": req.Messages,
+			"tools":    req.Tools,
+			"history":  history,
+		}
+		if raw, err := json.Marshal(fingerprint); err == nil {
+			seed = string(raw)
+		}
+	}
+	if strings.TrimSpace(seed) == "" {
+		return uuid.NewString()
+	}
+	sum := sha256.Sum256([]byte(seed))
+	if id, err := uuid.FromBytes(sum[:16]); err == nil {
+		return id.String()
+	}
+	return uuid.NewString()
+}
+
+func buildKiroAdditionalModelRequestFields(req kiroAnthropicRequest) map[string]any {
+	thinkingType := strings.ToLower(strings.TrimSpace(credentialValueToString(req.Thinking["type"])))
+	if thinkingType == "disabled" {
+		return nil
+	}
+	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		credentialValueToString(req.OutputConfig["effort"]),
+		req.ReasoningEffort,
+	)))
+	if effort == "" && (thinkingType == "enabled" || thinkingType == "adaptive") {
+		budget := intFromJSON(req.Thinking, 0, "budget_tokens")
+		switch {
+		case budget <= 0:
+			effort = "high"
+		case budget <= 4000:
+			effort = "low"
+		case budget <= 16000:
+			effort = "medium"
+		case budget <= 64000:
+			effort = "high"
+		default:
+			effort = "xhigh"
+		}
+	}
+	if effort == "" {
+		return nil
+	}
+	return map[string]any{
+		"thinking":      map[string]any{"type": "adaptive", "display": "summarized"},
+		"output_config": map[string]any{"effort": effort},
+	}
 }
 
 func setKiroHeaders(h http.Header, token string, creds *KiroCredentials) {
@@ -335,12 +507,37 @@ func setKiroHeaders(h http.Header, token string, creds *KiroCredentials) {
 	h.Set("content-type", "application/json")
 	h.Set("x-amzn-codewhisperer-optout", "true")
 	h.Set("x-amzn-kiro-agent-mode", "vibe")
-	h.Set("x-amz-user-agent", fmt.Sprintf("aws-sdk-js/1.0.0 KiroIDE-%s-%s", kiroVersion, machineID))
-	h.Set("user-agent", fmt.Sprintf("aws-sdk-js/1.0.0 ua/2.1 os/%s lang/js md/nodejs#%s api/codewhispererruntime#1.0.0 m/E KiroIDE-%s-%s", kiroOSString(), nodeVersion, kiroVersion, machineID))
+	h.Set("x-amz-user-agent", fmt.Sprintf("aws-sdk-js/%s KiroIDE %s %s", DefaultKiroAWSSDK, kiroVersion, machineID))
+	h.Set("user-agent", fmt.Sprintf("aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E KiroIDE-%s-%s", DefaultKiroAWSSDK, kiroOSString(), nodeVersion, DefaultKiroStreamingAPI, kiroVersion, machineID))
 	h.Set("amz-sdk-invocation-id", uuid.NewString())
-	h.Set("amz-sdk-request", "attempt=1; max=1")
+	h.Set("amz-sdk-request", "attempt=1; max=3")
 	h.Set("authorization", "Bearer "+token)
+	if creds != nil && creds.RequiresExternalIDPTokenType() {
+		h.Set("TokenType", "EXTERNAL_IDP")
+	}
 	h.Set("connection", "close")
+}
+
+func kiroAssistantURLForCredentials(creds *KiroCredentials) string {
+	region := ""
+	if creds != nil {
+		region = creds.Region
+	}
+	return kiroQServiceEndpoint(region) + "/generateAssistantResponse"
+}
+
+func kiroQServiceEndpoint(region string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(region)), "eu-") {
+		return kiroEUQEndpoint
+	}
+	return kiroDefaultQEndpoint
+}
+
+func kiroCodeWhispererEndpoint(region string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(region)), "eu-") {
+		return kiroEUCodeWhispererEndpoint
+	}
+	return kiroDefaultCodeWhispererEndpoint
 }
 
 func convertAnthropicToolsToKiro(tools []map[string]any) []map[string]any {

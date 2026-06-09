@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -15,19 +16,31 @@ import (
 )
 
 const (
-	DefaultKiroRegion      = "us-east-1"
-	DefaultKiroVersion     = "0.1.25"
-	DefaultKiroNodeVersion = "20.18.0"
-	DefaultKiroModelSonnet = "claude-sonnet-4"
-	DefaultKiroModelHaiku  = "claude-haiku-4.5"
-	DefaultKiroModelOpus   = "claude-opus-4.5"
-	DefaultKiroModelOpus46 = "claude-opus-4-6"
-	DefaultKiroModelOpus47 = "claude-opus-4-7"
-	DefaultKiroModelOpus48 = "claude-opus-4-8"
-	KiroAuthMethodIDC      = "idc"
-	KiroAuthMethodSocial   = "social"
-	KiroTokenRefreshMargin = 5 * time.Minute
+	DefaultKiroRegion       = "us-east-1"
+	DefaultKiroVersion      = "0.12.155"
+	DefaultKiroNodeVersion  = "22.22.0"
+	DefaultKiroAWSSDK       = "1.0.34"
+	DefaultKiroStreamingAPI = "1.0.34"
+	DefaultKiroModelSonnet  = "claude-sonnet-4"
+	DefaultKiroModelHaiku   = "claude-haiku-4.5"
+	DefaultKiroModelOpus    = "claude-opus-4.5"
+	DefaultKiroModelOpus46  = "claude-opus-4-6"
+	DefaultKiroModelOpus47  = "claude-opus-4-7"
+	DefaultKiroModelOpus48  = "claude-opus-4-8"
+	KiroAuthMethodIDC       = "idc"
+	KiroAuthMethodSocial    = "social"
+	KiroAuthMethodExternal  = "external_idp"
+	KiroTokenRefreshMargin  = 5 * time.Minute
 )
+
+const (
+	kiroBuilderIDProfileARN       = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
+	kiroSocialProfileARN          = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"
+	kiroEnterpriseFallbackAccount = "610548660232"
+	kiroEnterpriseFallbackProfile = "VNECVYCYYAWN"
+)
+
+var kiroClaudeMinorVersionPattern = regexp.MustCompile(`(?i)^(claude-(?:sonnet|haiku|opus))-(\d+)-(\d{1,2})([^0-9].*)?$`)
 
 var kiroDefaultModels = []claude.Model{
 	{
@@ -101,6 +114,7 @@ type KiroCredentials struct {
 	Region       string
 	IDCRegion    string
 	AuthMethod   string
+	Provider     string
 	UUID         string
 	StartURL     string
 	ExpiresAt    *time.Time
@@ -120,6 +134,7 @@ func NewKiroCredentialsFromMap(raw map[string]any) *KiroCredentials {
 		Region:       firstKiroCredentialString(raw, "region"),
 		IDCRegion:    firstKiroCredentialString(raw, "idc_region", "idcRegion"),
 		AuthMethod:   normalizeKiroAuthMethod(firstKiroCredentialString(raw, "auth_method", "authMethod")),
+		Provider:     firstKiroCredentialString(raw, "provider", "login_method", "loginMethod", "auth_provider", "authProvider"),
 		UUID:         firstKiroCredentialString(raw, "uuid"),
 		StartURL:     firstKiroCredentialString(raw, "start_url", "startUrl"),
 		LastRefresh:  firstKiroCredentialString(raw, "last_refresh", "lastRefresh"),
@@ -133,9 +148,10 @@ func NewKiroCredentialsFromMap(raw map[string]any) *KiroCredentials {
 	if c.AuthMethod == "" {
 		if c.ClientID != "" && c.ClientSecret != "" {
 			c.AuthMethod = KiroAuthMethodIDC
-		} else {
-			c.AuthMethod = KiroAuthMethodSocial
 		}
+	}
+	if c.AuthMethod == KiroAuthMethodIDC && c.ClientID != "" && c.ClientSecret != "" && isKiroEnterpriseStartURL(c.StartURL) {
+		c.AuthMethod = KiroAuthMethodExternal
 	}
 	c.ExpiresAt = parseKiroCredentialTime(firstKiroCredentialString(raw, "expires_at", "expiresAt", "expire"))
 	return c
@@ -182,6 +198,9 @@ func (c *KiroCredentials) ToCredentialMap() map[string]any {
 	if c.ProfileARN != "" {
 		out["profile_arn"] = c.ProfileARN
 	}
+	if c.Provider != "" {
+		out["provider"] = c.Provider
+	}
 	if c.UUID != "" {
 		out["uuid"] = c.UUID
 	}
@@ -206,9 +225,88 @@ func normalizeKiroAuthMethod(method string) string {
 		return KiroAuthMethodIDC
 	case KiroAuthMethodSocial:
 		return KiroAuthMethodSocial
+	case KiroAuthMethodExternal, "external-idp", "externalidp", "enterprise", "iam", "iam-identity-center", "iam_identity_center":
+		return KiroAuthMethodExternal
 	default:
 		return strings.ToLower(strings.TrimSpace(method))
 	}
+}
+
+func (c *KiroCredentials) UsesIDCRefresh() bool {
+	if c == nil {
+		return false
+	}
+	method := normalizeKiroAuthMethod(c.AuthMethod)
+	return method == KiroAuthMethodIDC || method == KiroAuthMethodExternal
+}
+
+func (c *KiroCredentials) RequiresExternalIDPTokenType() bool {
+	if c == nil {
+		return false
+	}
+	return c.IsEnterpriseExternalIDP()
+}
+
+func (c *KiroCredentials) IsEnterpriseExternalIDP() bool {
+	if c == nil {
+		return false
+	}
+	method := normalizeKiroAuthMethod(c.AuthMethod)
+	provider := strings.ToLower(strings.TrimSpace(c.Provider))
+	return method == KiroAuthMethodExternal ||
+		provider == "enterprise" ||
+		provider == "externalidp" ||
+		provider == "external_idp" ||
+		provider == "external-idp" ||
+		(method == KiroAuthMethodIDC && c.ClientID != "" && c.ClientSecret != "" && isKiroEnterpriseStartURL(c.StartURL))
+}
+
+func (c *KiroCredentials) IsSocialLogin() bool {
+	if c == nil {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(c.Provider))
+	return normalizeKiroAuthMethod(c.AuthMethod) == KiroAuthMethodSocial ||
+		provider == "github" ||
+		provider == "google"
+}
+
+func (c *KiroCredentials) EffectiveProfileARN() string {
+	if c == nil {
+		return ""
+	}
+	if arn := strings.TrimSpace(c.ProfileARN); arn != "" && !isKiroPlaceholderProfileARN(arn) {
+		return arn
+	}
+	if c.IsEnterpriseExternalIDP() {
+		return kiroEnterpriseFallbackProfileARN(c.Region)
+	}
+	if c.IsSocialLogin() {
+		return kiroSocialProfileARN
+	}
+	return kiroBuilderIDProfileARN
+}
+
+func isKiroPlaceholderProfileARN(arn string) bool {
+	return strings.TrimSpace(arn) == kiroBuilderIDProfileARN
+}
+
+func isKiroEnterpriseStartURL(startURL string) bool {
+	normalized := strings.TrimRight(strings.TrimSpace(startURL), "/")
+	if normalized == "" {
+		return false
+	}
+	return !strings.EqualFold(normalized, strings.TrimRight(kiroStartURL, "/"))
+}
+
+func kiroEnterpriseFallbackProfileARN(region string) string {
+	r := firstNonEmpty(region, DefaultKiroRegion)
+	if strings.HasPrefix(r, "eu-") {
+		r = "eu-central-1"
+	} else {
+		r = DefaultKiroRegion
+	}
+	return fmt.Sprintf("arn:aws:codewhisperer:%s:%s:profile/%s", r, kiroEnterpriseFallbackAccount, kiroEnterpriseFallbackProfile)
 }
 
 func firstKiroCredentialString(raw map[string]any, keys ...string) string {
@@ -271,9 +369,9 @@ func machineIDFromHost() string {
 func kiroOSString() string {
 	switch runtime.GOOS {
 	case "windows":
-		return "windows#10.0"
+		return "win32#10.0.19043"
 	case "darwin":
-		return "macos#14.0"
+		return "macos#14.0.0"
 	case "linux":
 		if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
 			if release := strings.TrimSpace(string(data)); release != "" {
@@ -284,6 +382,14 @@ func kiroOSString() string {
 	default:
 		return fmt.Sprintf("%s#unknown", runtime.GOOS)
 	}
+}
+
+func kiroUpstreamModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return model
+	}
+	return kiroClaudeMinorVersionPattern.ReplaceAllString(model, "$1-$2.$3$4")
 }
 
 func defaultKiroMappedModel(requested string) string {

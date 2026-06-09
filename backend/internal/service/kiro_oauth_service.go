@@ -294,12 +294,16 @@ func (s *KiroOAuthService) PollDeviceFlow(ctx context.Context, sessionID string,
 			return nil, fmt.Errorf("parse Kiro token response: %w", err)
 		}
 		s.CancelDeviceFlow(sessionID)
+		authMethod := KiroAuthMethodIDC
+		if isKiroEnterpriseStartURL(session.StartURL) {
+			authMethod = KiroAuthMethodExternal
+		}
 		tokenInfo := kiroTokenInfoFromResponse(parsed, &KiroCredentials{
 			ClientID:     session.ClientID,
 			ClientSecret: session.ClientSecret,
 			Region:       session.Region,
 			IDCRegion:    session.Region,
-			AuthMethod:   KiroAuthMethodIDC,
+			AuthMethod:   authMethod,
 			StartURL:     firstNonEmpty(session.StartURL, kiroStartURL),
 		})
 		if strings.TrimSpace(tokenInfo.AccessToken) == "" {
@@ -466,6 +470,9 @@ func (s *KiroOAuthService) RefreshToken(ctx context.Context, creds *KiroCredenti
 			method = KiroAuthMethodSocial
 		}
 	}
+	if method == KiroAuthMethodIDC && creds.ClientID != "" && creds.ClientSecret != "" && isKiroEnterpriseStartURL(creds.StartURL) {
+		method = KiroAuthMethodExternal
+	}
 	creds.AuthMethod = method
 	region := firstNonEmpty(creds.Region, DefaultKiroRegion)
 	idcRegion := firstNonEmpty(creds.IDCRegion, region)
@@ -475,7 +482,7 @@ func (s *KiroOAuthService) RefreshToken(ctx context.Context, creds *KiroCredenti
 	var refreshURL string
 	var body map[string]any
 	headers := map[string]string{"Content-Type": "application/json"}
-	if method == KiroAuthMethodIDC {
+	if creds.UsesIDCRefresh() {
 		if creds.ClientID == "" || creds.ClientSecret == "" {
 			return nil, fmt.Errorf("Kiro IdC refresh missing client_id/client_secret")
 		}
