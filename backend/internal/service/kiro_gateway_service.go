@@ -254,6 +254,7 @@ func (s *KiroGatewayService) useLatestCredentialsIfStale(ctx context.Context, ac
 	}
 	if isStale || kiroCredentialsDiffer(account, latestAccount) {
 		account.Credentials = cloneCredentials(latestAccount.Credentials)
+		s.syncSchedulerAccountCache(ctx, account)
 	}
 	return account
 }
@@ -341,11 +342,44 @@ func kiroCredentialsDiffer(current, latest *Account) bool {
 	if current == nil || latest == nil {
 		return false
 	}
-	for _, key := range []string{"access_token", "refresh_token"} {
-		latestValue := strings.TrimSpace(latest.GetCredential(key))
-		if latestValue != "" && latestValue != strings.TrimSpace(current.GetCredential(key)) {
+	currentCreds := NewKiroCredentialsFromMap(current.Credentials)
+	latestCreds := NewKiroCredentialsFromMap(latest.Credentials)
+
+	for _, pair := range []struct {
+		current string
+		latest  string
+	}{
+		{currentCreds.AccessToken, latestCreds.AccessToken},
+		{currentCreds.RefreshToken, latestCreds.RefreshToken},
+		{currentCreds.ClientID, latestCreds.ClientID},
+		{currentCreds.ClientSecret, latestCreds.ClientSecret},
+		{currentCreds.ProfileARN, latestCreds.ProfileARN},
+		{currentCreds.Region, latestCreds.Region},
+		{currentCreds.IDCRegion, latestCreds.IDCRegion},
+		{normalizeKiroAuthMethod(currentCreds.AuthMethod), normalizeKiroAuthMethod(latestCreds.AuthMethod)},
+		{currentCreds.Provider, latestCreds.Provider},
+		{currentCreds.UUID, latestCreds.UUID},
+		{currentCreds.StartURL, latestCreds.StartURL},
+		{currentCreds.LastRefresh, latestCreds.LastRefresh},
+	} {
+		latestValue := strings.TrimSpace(pair.latest)
+		if latestValue != "" && latestValue != strings.TrimSpace(pair.current) {
 			return true
 		}
+	}
+	if latestTokenType := strings.TrimSpace(firstKiroCredentialString(latest.Credentials, "token_type", "tokenType")); latestTokenType != "" &&
+		!strings.EqualFold(latestTokenType, strings.TrimSpace(firstKiroCredentialString(current.Credentials, "token_type", "tokenType"))) {
+		return true
+	}
+	if latestCreds.ExpiresAt != nil && (currentCreds.ExpiresAt == nil || !latestCreds.ExpiresAt.Equal(*currentCreds.ExpiresAt)) {
+		return true
+	}
+	if latestCreds.RequiresExternalIDPTokenType() != currentCreds.RequiresExternalIDPTokenType() {
+		return true
+	}
+	if latestProfile := strings.TrimSpace(latestCreds.EffectiveProfileARN()); latestProfile != "" &&
+		latestProfile != strings.TrimSpace(currentCreds.EffectiveProfileARN()) {
+		return true
 	}
 	return false
 }

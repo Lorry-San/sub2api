@@ -358,6 +358,74 @@ func TestKiroGatewayService_UsesLatestCredentialsWhenSnapshotTokenDiffers(t *tes
 	require.Equal(t, "new-token", account.GetCredential("access_token"))
 }
 
+func TestKiroGatewayService_UsesLatestCredentialsWhenKiroAuthConfigDiffers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"assistantResponseEvent":{"content":"ok"}}`)),
+		},
+	}
+	expiresAt := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	realARN := "arn:aws:codewhisperer:us-east-1:111122223333:profile/REALPROFILE"
+	repo := &mockAccountRepoForGemini{accountsByID: map[int64]*Account{
+		99: {
+			ID:          99,
+			Name:        "kiro-db-enterprise",
+			Platform:    PlatformKiro,
+			Type:        AccountTypeOAuth,
+			Concurrency: 1,
+			Credentials: map[string]any{
+				"access_token":  "same-token",
+				"refresh_token": "same-refresh",
+				"expires_at":    expiresAt,
+				"auth_method":   KiroAuthMethodExternal,
+				"client_id":     "client",
+				"client_secret": "secret",
+				"start_url":     "https://example.awsapps.com/start",
+				"profile_arn":   realARN,
+				"region":        "us-east-1",
+			},
+		},
+	}}
+	cache := &snapshotHydrationCache{}
+	snapshot := NewSchedulerSnapshotService(cache, nil, nil, nil, nil)
+	svc := NewKiroGatewayService(repo, upstream, nil, snapshot)
+	account := &Account{
+		ID:          99,
+		Name:        "kiro-cache-stale-auth",
+		Platform:    PlatformKiro,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":  "same-token",
+			"refresh_token": "same-refresh",
+			"expires_at":    expiresAt,
+		},
+	}
+	parsed := &ParsedRequest{Body: NewRequestBodyRef(body), Model: DefaultKiroModelSonnet}
+
+	_, err := svc.ForwardAnthropic(context.Background(), c, account, parsed)
+	require.NoError(t, err)
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, "Bearer same-token", upstream.lastReq.Header.Get("Authorization"))
+	require.Equal(t, "EXTERNAL_IDP", upstream.lastReq.Header.Get("TokenType"))
+	require.Equal(t, realARN, gjson.GetBytes(upstream.lastBody, "profileArn").String())
+	require.Equal(t, KiroAuthMethodExternal, account.GetCredential("auth_method"))
+	require.Equal(t, realARN, account.GetCredential("profile_arn"))
+
+	cached, err := snapshot.GetAccount(context.Background(), account.ID)
+	require.NoError(t, err)
+	require.NotNil(t, cached)
+	require.Equal(t, realARN, cached.GetCredential("profile_arn"))
+}
+
 func TestKiroGatewayService_RefreshSyncsSchedulerCache(t *testing.T) {
 	account := &Account{
 		ID:          96,
