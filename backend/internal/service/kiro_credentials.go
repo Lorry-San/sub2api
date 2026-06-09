@@ -24,9 +24,9 @@ const (
 	DefaultKiroModelSonnet  = "claude-sonnet-4"
 	DefaultKiroModelHaiku   = "claude-haiku-4.5"
 	DefaultKiroModelOpus    = "claude-opus-4.5"
-	DefaultKiroModelOpus46  = "claude-opus-4-6"
-	DefaultKiroModelOpus47  = "claude-opus-4-7"
-	DefaultKiroModelOpus48  = "claude-opus-4-8"
+	DefaultKiroModelOpus46  = "claude-opus-4.6"
+	DefaultKiroModelOpus47  = "claude-opus-4.7"
+	DefaultKiroModelOpus48  = "claude-opus-4.8"
 	KiroAuthMethodIDC       = "idc"
 	KiroAuthMethodSocial    = "social"
 	KiroAuthMethodExternal  = "external_idp"
@@ -287,6 +287,22 @@ func (c *KiroCredentials) EffectiveProfileARN() string {
 	return kiroBuilderIDProfileARN
 }
 
+func (c *KiroCredentials) GenerationProfileARN() string {
+	if c == nil {
+		return ""
+	}
+	if arn := strings.TrimSpace(c.ProfileARN); arn != "" && !isKiroPlaceholderProfileARN(arn) {
+		return arn
+	}
+	if c.IsEnterpriseExternalIDP() {
+		return kiroEnterpriseFallbackProfileARN(c.Region)
+	}
+	if c.IsSocialLogin() {
+		return kiroSocialProfileARN
+	}
+	return ""
+}
+
 func isKiroPlaceholderProfileARN(arn string) bool {
 	return strings.TrimSpace(arn) == kiroBuilderIDProfileARN
 }
@@ -390,6 +406,18 @@ func kiroUpstreamModelID(model string) string {
 		return model
 	}
 	return kiroClaudeMinorVersionPattern.ReplaceAllString(model, "$1-$2.$3$4")
+}
+
+func kiroClientResponseModel(requested, mapped string) string {
+	requested = strings.TrimSpace(requested)
+	normalizedRequested := kiroUpstreamModelID(requested)
+	if strings.HasPrefix(strings.ToLower(normalizedRequested), "claude-") {
+		return normalizedRequested
+	}
+	if requested != "" {
+		return requested
+	}
+	return strings.TrimSpace(mapped)
 }
 
 func defaultKiroMappedModel(requested string) string {

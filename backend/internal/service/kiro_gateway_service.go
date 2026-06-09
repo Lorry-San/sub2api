@@ -108,63 +108,32 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 
 	requestedModel := reqPayload.Model
 	mappedModel := defaultKiroMappedModel(account.GetMappedModel(requestedModel))
+	clientModel := kiroClientResponseModel(requestedModel, mappedModel)
 	upstreamModel := kiroUpstreamModelID(mappedModel)
-
-	buildUpstreamReq := func(token string, currentCreds *KiroCredentials) (*http.Request, error) {
-		kiroBody, err := buildKiroRequestFromAnthropic(reqPayload, upstreamModel, currentCreds)
-		if err != nil {
-			return nil, err
-		}
-		wireBody, err := json.Marshal(kiroBody)
-		if err != nil {
-			return nil, err
-		}
-		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, kiroAssistantURLForCredentials(currentCreds), bytes.NewReader(wireBody))
-		if err != nil {
-			return nil, err
-		}
-		setKiroHeaders(upstreamReq.Header, token, currentCreds)
-		return upstreamReq, nil
-	}
-
-	upstreamReq, err := buildUpstreamReq(accessToken, creds)
-	if err != nil {
-		return nil, err
-	}
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+
+	doGeneration := func(token string, currentCreds *KiroCredentials) (*http.Response, []byte, error) {
+		return s.doKiroGeneration(ctx, account, token, currentCreds, reqPayload, upstreamModel, proxyURL)
+	}
+
+	resp, raw, err := doGeneration(accessToken, creds)
 	if err != nil {
 		s.writeKiroJSONError(c, http.StatusBadGateway, "upstream_error", "Kiro upstream request failed")
 		return nil, err
-	}
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	_ = resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("read Kiro upstream response: %w", err)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		refreshedToken, refreshedCreds, refreshErr := s.forceRefreshAccessToken(ctx, account)
 		if refreshErr == nil && strings.TrimSpace(refreshedToken) != "" {
 			creds = NewKiroCredentialsFromMap(refreshedCreds)
 			creds = s.ensureKiroProfileARN(ctx, account, creds, refreshedToken)
-			retryReq, reqErr := buildUpstreamReq(refreshedToken, creds)
-			if reqErr != nil {
-				return nil, reqErr
-			}
-			resp, err = s.httpUpstream.Do(retryReq, proxyURL, account.ID, account.Concurrency)
+			resp, raw, err = doGeneration(refreshedToken, creds)
 			if err != nil {
 				s.writeKiroJSONError(c, http.StatusBadGateway, "upstream_error", "Kiro upstream request failed")
 				return nil, err
-			}
-			raw, err = io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-			_ = resp.Body.Close()
-			if err != nil {
-				return nil, fmt.Errorf("read Kiro upstream retry response: %w", err)
 			}
 		}
 	}
@@ -177,19 +146,19 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 			}
 		}
 		c.Data(resp.StatusCode, firstNonEmpty(resp.Header.Get("Content-Type"), "application/json"), raw)
-		return &ForwardResult{Model: requestedModel, UpstreamModel: mappedModel, Duration: time.Since(start)}, nil
+		return &ForwardResult{Model: clientModel, UpstreamModel: mappedModel, Duration: time.Since(start)}, nil
 	}
 
 	parsedResp := parseKiroEventStream(raw)
 	usage := estimateKiroUsage(reqPayload, parsedResp)
 	if reqPayload.Stream {
-		writeKiroAnthropicStream(c, requestedModel, parsedResp, usage)
+		writeKiroAnthropicStream(c, clientModel, parsedResp, usage)
 	} else {
-		c.JSON(http.StatusOK, kiroAnthropicResponse(requestedModel, parsedResp, usage))
+		c.JSON(http.StatusOK, kiroAnthropicResponse(clientModel, parsedResp, usage))
 	}
 
 	return &ForwardResult{
-		Model:         requestedModel,
+		Model:         clientModel,
 		UpstreamModel: mappedModel,
 		Stream:        reqPayload.Stream,
 		Duration:      time.Since(start),
@@ -408,6 +377,58 @@ func forceRefreshKiroAccessToken(ctx context.Context, oauthService *KiroOAuthSer
 	return tokenInfo.AccessToken, merged, nil
 }
 
+type kiroGenerationEndpoint struct {
+	Name string
+	URL  string
+}
+
+func (s *KiroGatewayService) doKiroGeneration(
+	ctx context.Context,
+	account *Account,
+	token string,
+	creds *KiroCredentials,
+	reqPayload kiroAnthropicRequest,
+	model string,
+	proxyURL string,
+) (*http.Response, []byte, error) {
+	if s == nil || s.httpUpstream == nil {
+		return nil, nil, fmt.Errorf("Kiro gateway service is not configured")
+	}
+	endpoints := kiroGenerationEndpointsForCredentials(creds)
+	var lastResp *http.Response
+	var lastRaw []byte
+	for idx, endpoint := range endpoints {
+		kiroBody, err := buildKiroRequestFromAnthropic(reqPayload, model, creds)
+		if err != nil {
+			return nil, nil, err
+		}
+		wireBody, err := json.Marshal(kiroBody)
+		if err != nil {
+			return nil, nil, err
+		}
+		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL, bytes.NewReader(wireBody))
+		if err != nil {
+			return nil, nil, err
+		}
+		setKiroHeaders(upstreamReq.Header, token, creds)
+		resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		if err != nil {
+			return nil, nil, err
+		}
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, nil, fmt.Errorf("read Kiro upstream response from %s: %w", endpoint.Name, err)
+		}
+		lastResp = resp
+		lastRaw = raw
+		if resp.StatusCode < http.StatusBadRequest || idx == len(endpoints)-1 || !shouldRetryKiroAlternateEndpoint(resp.StatusCode, raw) {
+			return resp, raw, nil
+		}
+	}
+	return lastResp, lastRaw, nil
+}
+
 func buildKiroRequestFromAnthropic(req kiroAnthropicRequest, model string, creds *KiroCredentials) (map[string]any, error) {
 	userContent, history, toolResults := convertAnthropicMessagesToKiro(req.Messages, req.System, req.Thinking)
 	if strings.TrimSpace(userContent) == "" {
@@ -439,7 +460,7 @@ func buildKiroRequestFromAnthropic(req kiroAnthropicRequest, model string, creds
 		conversationState["history"] = normalizeKiroHistory(history, model)
 	}
 	payload := map[string]any{"conversationState": conversationState}
-	if profileARN := creds.EffectiveProfileARN(); profileARN != "" {
+	if profileARN := creds.GenerationProfileARN(); profileARN != "" {
 		conversationState["profileArn"] = profileARN
 		payload["profileArn"] = profileARN
 	}
@@ -553,11 +574,47 @@ func setKiroHeaders(h http.Header, token string, creds *KiroCredentials) {
 }
 
 func kiroAssistantURLForCredentials(creds *KiroCredentials) string {
+	endpoints := kiroGenerationEndpointsForCredentials(creds)
+	if len(endpoints) == 0 {
+		return kiroAssistantURL
+	}
+	return endpoints[0].URL
+}
+
+func kiroGenerationEndpointsForCredentials(creds *KiroCredentials) []kiroGenerationEndpoint {
 	region := ""
 	if creds != nil {
 		region = creds.Region
 	}
-	return kiroQServiceEndpoint(region) + "/generateAssistantResponse"
+	qEndpoint := kiroGenerationEndpoint{Name: "AmazonQ", URL: kiroQServiceEndpoint(region) + "/generateAssistantResponse"}
+	codeWhispererEndpoint := kiroGenerationEndpoint{Name: "CodeWhisperer", URL: kiroCodeWhispererEndpoint(region) + "/generateAssistantResponse"}
+	if creds != nil && creds.IsEnterpriseExternalIDP() {
+		return []kiroGenerationEndpoint{codeWhispererEndpoint, qEndpoint}
+	}
+	return []kiroGenerationEndpoint{qEndpoint, codeWhispererEndpoint}
+}
+
+func shouldRetryKiroAlternateEndpoint(status int, raw []byte) bool {
+	if status == http.StatusUnauthorized ||
+		status == http.StatusForbidden ||
+		status == http.StatusTooManyRequests ||
+		status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout ||
+		status == 529 {
+		return true
+	}
+	if status >= http.StatusInternalServerError {
+		return true
+	}
+	if status == http.StatusBadRequest {
+		body := strings.ToLower(string(raw))
+		return strings.Contains(body, "profilearn") ||
+			strings.Contains(body, "invalid bearer token") ||
+			strings.Contains(body, "model") ||
+			strings.Contains(body, "improperly formed")
+	}
+	return false
 }
 
 func kiroQServiceEndpoint(region string) string {
