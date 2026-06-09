@@ -23,16 +23,22 @@ const (
 )
 
 type KiroGatewayService struct {
-	accountRepo      AccountRepository
-	httpUpstream     HTTPUpstream
-	kiroOAuthService *KiroOAuthService
+	accountRepo       AccountRepository
+	httpUpstream      HTTPUpstream
+	kiroOAuthService  *KiroOAuthService
+	schedulerSnapshot *SchedulerSnapshotService
 }
 
-func NewKiroGatewayService(accountRepo AccountRepository, httpUpstream HTTPUpstream, kiroOAuthService *KiroOAuthService) *KiroGatewayService {
+func NewKiroGatewayService(accountRepo AccountRepository, httpUpstream HTTPUpstream, kiroOAuthService *KiroOAuthService, schedulerSnapshot ...*SchedulerSnapshotService) *KiroGatewayService {
+	var snapshot *SchedulerSnapshotService
+	if len(schedulerSnapshot) > 0 {
+		snapshot = schedulerSnapshot[0]
+	}
 	return &KiroGatewayService{
-		accountRepo:      accountRepo,
-		httpUpstream:     httpUpstream,
-		kiroOAuthService: kiroOAuthService,
+		accountRepo:       accountRepo,
+		httpUpstream:      httpUpstream,
+		kiroOAuthService:  kiroOAuthService,
+		schedulerSnapshot: snapshot,
 	}
 }
 
@@ -76,6 +82,7 @@ func (s *KiroGatewayService) ForwardAnthropic(ctx context.Context, c *gin.Contex
 		return nil, fmt.Errorf("missing model")
 	}
 
+	account = s.useLatestCredentialsIfStale(ctx, account)
 	creds := NewKiroCredentialsFromMap(account.Credentials)
 	accessToken, updatedCreds, err := s.resolveAccessToken(ctx, account, creds)
 	if err != nil {
@@ -207,6 +214,7 @@ func (s *KiroGatewayService) resolveAccessToken(ctx context.Context, account *Ac
 		}
 		newCredentials = merged
 	}
+	s.syncSchedulerAccountCache(ctx, account)
 	return tokenInfo.AccessToken, newCredentials, nil
 }
 
@@ -214,7 +222,45 @@ func (s *KiroGatewayService) forceRefreshAccessToken(ctx context.Context, accoun
 	if s == nil {
 		return "", nil, fmt.Errorf("Kiro gateway service is not configured")
 	}
-	return forceRefreshKiroAccessToken(ctx, s.kiroOAuthService, s.accountRepo, account)
+	token, credentials, err := forceRefreshKiroAccessToken(ctx, s.kiroOAuthService, s.accountRepo, account)
+	if err == nil {
+		s.syncSchedulerAccountCache(ctx, account)
+	}
+	return token, credentials, err
+}
+
+func (s *KiroGatewayService) useLatestCredentialsIfStale(ctx context.Context, account *Account) *Account {
+	if s == nil || account == nil || s.accountRepo == nil || account.Platform != PlatformKiro || account.Type != AccountTypeOAuth {
+		return account
+	}
+	latestAccount, isStale := CheckTokenVersion(ctx, account, s.accountRepo)
+	if latestAccount == nil {
+		return account
+	}
+	if isStale || kiroCredentialsDiffer(account, latestAccount) {
+		account.Credentials = cloneCredentials(latestAccount.Credentials)
+	}
+	return account
+}
+
+func (s *KiroGatewayService) syncSchedulerAccountCache(ctx context.Context, account *Account) {
+	if s == nil || s.schedulerSnapshot == nil || account == nil {
+		return
+	}
+	_ = s.schedulerSnapshot.UpdateAccountInCache(ctx, account)
+}
+
+func kiroCredentialsDiffer(current, latest *Account) bool {
+	if current == nil || latest == nil {
+		return false
+	}
+	for _, key := range []string{"access_token", "refresh_token"} {
+		latestValue := strings.TrimSpace(latest.GetCredential(key))
+		if latestValue != "" && latestValue != strings.TrimSpace(current.GetCredential(key)) {
+			return true
+		}
+	}
+	return false
 }
 
 func forceRefreshKiroAccessToken(ctx context.Context, oauthService *KiroOAuthService, accountRepo AccountRepository, account *Account) (string, map[string]any, error) {

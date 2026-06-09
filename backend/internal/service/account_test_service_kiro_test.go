@@ -147,6 +147,81 @@ func TestKiroGatewayService_EstimatesUsage(t *testing.T) {
 	require.Equal(t, result.Usage.OutputTokens, int(gjson.Get(rec.Body.String(), "usage.output_tokens").Int()))
 }
 
+func TestKiroGatewayService_UsesLatestCredentialsWhenSnapshotTokenDiffers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"assistantResponseEvent":{"content":"ok"}}`)),
+		},
+	}
+	repo := &mockAccountRepoForGemini{accountsByID: map[int64]*Account{
+		95: {
+			ID:          95,
+			Name:        "kiro-db",
+			Platform:    PlatformKiro,
+			Type:        AccountTypeOAuth,
+			Concurrency: 1,
+			Credentials: map[string]any{
+				"access_token":  "new-token",
+				"refresh_token": "new-refresh",
+				"expires_at":    strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+			},
+		},
+	}}
+	svc := NewKiroGatewayService(repo, upstream, nil)
+	account := &Account{
+		ID:          95,
+		Name:        "kiro-cache",
+		Platform:    PlatformKiro,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":  "old-token",
+			"refresh_token": "old-refresh",
+			"expires_at":    strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+		},
+	}
+	parsed := &ParsedRequest{Body: NewRequestBodyRef(body), Model: DefaultKiroModelSonnet}
+
+	_, err := svc.ForwardAnthropic(context.Background(), c, account, parsed)
+	require.NoError(t, err)
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, "Bearer new-token", upstream.lastReq.Header.Get("Authorization"))
+	require.Equal(t, "new-token", account.GetCredential("access_token"))
+}
+
+func TestKiroGatewayService_RefreshSyncsSchedulerCache(t *testing.T) {
+	account := &Account{
+		ID:          96,
+		Name:        "kiro-sync",
+		Platform:    PlatformKiro,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":   "fresh-token",
+			"expires_at":     strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+			"_token_version": int64(300),
+		},
+	}
+	cache := &snapshotHydrationCache{}
+	snapshot := NewSchedulerSnapshotService(cache, nil, nil, nil, nil)
+	svc := NewKiroGatewayService(nil, &httpUpstreamRecorder{}, nil, snapshot)
+
+	svc.syncSchedulerAccountCache(context.Background(), account)
+
+	cached, err := snapshot.GetAccount(context.Background(), account.ID)
+	require.NoError(t, err)
+	require.NotNil(t, cached)
+	require.Equal(t, "fresh-token", cached.GetCredential("access_token"))
+}
+
 func TestEstimateKiroCountTokensFromBody(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4","system":"你是一个代码助手","messages":[{"role":"user","content":"please explain this function"}]}`)
 

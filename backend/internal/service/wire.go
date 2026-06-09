@@ -86,8 +86,13 @@ func ProvideTokenRefreshService(
 }
 
 // ProvideKiroGatewayService creates the Kiro/Amazon Q gateway adapter.
-func ProvideKiroGatewayService(accountRepo AccountRepository, httpUpstream HTTPUpstream, kiroOAuthService *KiroOAuthService) *KiroGatewayService {
-	return NewKiroGatewayService(accountRepo, httpUpstream, kiroOAuthService)
+func ProvideKiroGatewayService(
+	accountRepo AccountRepository,
+	httpUpstream HTTPUpstream,
+	kiroOAuthService *KiroOAuthService,
+	schedulerSnapshot *SchedulerSnapshotService,
+) *KiroGatewayService {
+	return NewKiroGatewayService(accountRepo, httpUpstream, kiroOAuthService, schedulerSnapshot)
 }
 
 // ProvideClaudeTokenProvider creates ClaudeTokenProvider with OAuthRefreshAPI injection

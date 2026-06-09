@@ -888,7 +888,7 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		// 如果 project_id 获取失败，更新凭证但不标记为 error
 		if tokenInfo.ProjectIDMissing {
 			updatedAccount, updateErr := h.adminService.UpdateAccount(ctx, account.ID, &service.UpdateAccountInput{
-				Credentials: newCredentials,
+				Credentials: stampOAuthTokenVersion(newCredentials),
 			})
 			if updateErr != nil {
 				return nil, "", fmt.Errorf("failed to update credentials: %w", updateErr)
@@ -942,7 +942,7 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 	}
 
 	updatedAccount, err := h.adminService.UpdateAccount(ctx, account.ID, &service.UpdateAccountInput{
-		Credentials: newCredentials,
+		Credentials: stampOAuthTokenVersion(newCredentials),
 	})
 	if err != nil {
 		return nil, "", err
@@ -961,6 +961,14 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 	h.adminService.EnsureAntigravityPrivacy(ctx, updatedAccount)
 
 	return updatedAccount, "", nil
+}
+
+func stampOAuthTokenVersion(credentials map[string]any) map[string]any {
+	if credentials == nil {
+		credentials = map[string]any{}
+	}
+	credentials["_token_version"] = time.Now().UnixMilli()
+	return credentials
 }
 
 // Refresh handles refreshing account credentials

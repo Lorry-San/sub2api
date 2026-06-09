@@ -75,6 +75,19 @@ func (m *mockAccountRepoForGemini) ListCRSAccountIDs(ctx context.Context) (map[s
 	return nil, nil
 }
 func (m *mockAccountRepoForGemini) Update(ctx context.Context, account *Account) error { return nil }
+func (m *mockAccountRepoForGemini) UpdateCredentials(ctx context.Context, id int64, credentials map[string]any) error {
+	if m.accountsByID != nil {
+		if acc, ok := m.accountsByID[id]; ok {
+			acc.Credentials = cloneCredentials(credentials)
+		}
+	}
+	for i := range m.accounts {
+		if m.accounts[i].ID == id {
+			m.accounts[i].Credentials = cloneCredentials(credentials)
+		}
+	}
+	return nil
+}
 func (m *mockAccountRepoForGemini) Delete(ctx context.Context, id int64) error         { return nil }
 func (m *mockAccountRepoForGemini) List(ctx context.Context, params pagination.PaginationParams) ([]Account, *pagination.PaginationResult, error) {
 	return nil, nil, nil

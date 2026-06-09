@@ -31,6 +31,10 @@ func (c *snapshotHydrationCache) GetAccount(ctx context.Context, accountID int64
 }
 
 func (c *snapshotHydrationCache) SetAccount(ctx context.Context, account *Account) error {
+	if c.accounts == nil {
+		c.accounts = make(map[int64]*Account)
+	}
+	c.accounts[account.ID] = account
 	return nil
 }
 
